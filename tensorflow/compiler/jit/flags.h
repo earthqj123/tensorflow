@@ -18,7 +18,9 @@ limitations under the License.
 
 #include <vector>
 
+#include "absl/types/optional.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/util/command_line_flags.h"
 
 namespace tensorflow {
@@ -38,7 +40,7 @@ struct XlaAutoJitFlag {
   int32 optimization_level_general;
 };
 
-// Sets the xla_auto_jit_flag based on the given flag sting. Supported syntax
+// Sets the xla_auto_jit_flag based on the given flag string. Supported syntax
 // is:
 // <number>: sets general and single_gpu setting to the provided number.
 // single-gpu(<number>): sets the single_gpu setting to the provided number.
@@ -54,6 +56,9 @@ struct MarkForCompilationPassFlags {
 
   // Maximum number of operators in an XLA compilation.
   int32 tf_xla_max_cluster_size;
+
+  // If non-empty, limit XLA clustering to the following TF operations.
+  string tf_xla_ops_to_cluster;
 
   // Dump graphs during XLA compilation.
   bool tf_xla_clustering_debug;
@@ -84,6 +89,9 @@ struct XlaDeviceFlags {
   // Enabling this mode by a legacy flag is a temporary mechanism. When this
   // feature is battle-tested, we will switch this to be a session option.
   bool tf_xla_compile_on_demand;
+
+  // Enables "XLA" devices if this flag is set.
+  bool tf_xla_enable_xla_devices;
 };
 
 // Flags common to the _Xla* ops and their kernels.
@@ -91,6 +99,9 @@ struct XlaOpsCommonFlags {
   // If true, _XlaCompile always refuses to compile the cluster, which means the
   // XLA clusters always run in the TF executor.  Defaults to false.
   bool tf_xla_always_defer_compilation;
+  // If true, _XlaCompile compiles the cluster asynchronously with respect to
+  // the main execution. The fallback path is taken while compilation happens.
+  bool tf_xla_async_compilation;
 };
 
 // Flags for the build_xla_ops pass.
@@ -127,6 +138,11 @@ struct IntroduceFloatingPointJitterPassFlags {
   std::vector<string> tensor_names;
 };
 
+// Flags for common MLIR configurations.
+struct MlirCommonFlags {
+  ConfigProto::Experimental::MlirBridgeRollout tf_mlir_enable_mlir_bridge;
+};
+
 // Return a pointer to the DumpGraphFlags struct;
 // repeated calls return the same pointer.
 // This should be called only after Flags::Parse() has returned.
@@ -142,12 +158,27 @@ const XlaOpsCommonFlags& GetXlaOpsCommonFlags();
 const IntroduceFloatingPointJitterPassFlags&
 GetIntroduceFloatingPointJitterPassFlags();
 
+MlirCommonFlags* GetMlirCommonFlags();
+
+// Returns the effective MLIR bridge rollout state based on the flags and the
+// optional configuration.
+ConfigProto::Experimental::MlirBridgeRollout GetMlirBridgeRolloutState(
+    absl::optional<const ConfigProto> config_proto);
+
 // Appends the flag definitions associated with
 // MarkForCompilationPassFlags/DumpGraphFlags to `flag_list`.
 //
 // Has the side-effect of parsing TF_XLA_FLAGS if that hasn't happened yet.
 void AppendMarkForCompilationPassFlags(
     std::vector<tensorflow::Flag>* flag_list);
+
+// Disables XLA compilation, forces it to return an error message instead. Can
+// be used by a server to ensure that JIT compilation is opt-in.
+void DisableXlaCompilation();
+
+// Returns `false` unless `DisableXlaCompilation` was called.
+bool FailOnXlaCompilation();
+
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_COMPILER_JIT_FLAGS_H_

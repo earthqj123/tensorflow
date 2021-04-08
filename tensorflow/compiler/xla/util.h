@@ -25,9 +25,11 @@ limitations under the License.
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/base/thread_annotations.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "tensorflow/compiler/xla/status.h"
@@ -86,29 +88,32 @@ using DimensionVector = absl::InlinedVector<int64, kInlineRank>;
   XLA_SCOPED_LOGGING_TIMER_HELPER2(label, level, counter)
 
 // Helper for macros above.  Don't use directly.
-#define XLA_SCOPED_LOGGING_TIMER_HELPER2(label, level, counter)         \
-  static ::xla::TimerStats XLA_TimerStats##counter;                     \
-  ::xla::ScopedLoggingTimer XLA_ScopedLoggingTimerInstance##counter(    \
-      label, /*enabled=*/VLOG_IS_ON(level), &XLA_TimerStats##counter);
+#define XLA_SCOPED_LOGGING_TIMER_HELPER2(label, level, counter)      \
+  static ::xla::TimerStats XLA_TimerStats##counter;                  \
+  ::xla::ScopedLoggingTimer XLA_ScopedLoggingTimerInstance##counter( \
+      label, /*enabled=*/VLOG_IS_ON(level), __FILE__, __LINE__,      \
+      &XLA_TimerStats##counter);
 
 struct TimerStats {
   tensorflow::mutex stats_mutex;
-  double cumulative_secs GUARDED_BY(stats_mutex) = 0;
-  double max_secs GUARDED_BY(stats_mutex) = 0;
-  uint64 times_called GUARDED_BY(stats_mutex) = 0;
+  double cumulative_secs ABSL_GUARDED_BY(stats_mutex) = 0;
+  double max_secs ABSL_GUARDED_BY(stats_mutex) = 0;
+  uint64 times_called ABSL_GUARDED_BY(stats_mutex) = 0;
 };
 
 // RAII timer for XLA_SCOPED_LOGGING_TIMER and XLA_SCOPED_LOGGING_TIMER_LEVEL
 // macros above.  Recommended usage is via the macros so you don't have to give
 // the timer a name or worry about calling VLOG_IS_ON yourself.
-struct ScopedLoggingTimer {
-  // The timer does nothing if enabled is false.  This lets you pass in your
-  // file's VLOG_IS_ON value.
-  //
-  // timer_stats is unowned non-null pointer which is used to populate the
+class ScopedLoggingTimer {
+ public:
+  // label: Label to display for logging.
+  // enabled: Whether this timer should do anything at all.
+  // file: Filename to display in logging.
+  // line: Line number to display in logging.
+  // `timer_stats`: unowned non-null pointer which is used to populate the
   // global timer statistics.
-  ScopedLoggingTimer(const std::string& label, bool enabled,
-                     TimerStats* timer_stats);
+  ScopedLoggingTimer(const std::string& label, bool enabled, const char* file,
+                     int line, TimerStats* timer_stats);
 
   // Stop the timer and log the tracked time. Timer is disabled after this
   // function is called.
@@ -116,10 +121,13 @@ struct ScopedLoggingTimer {
 
   ~ScopedLoggingTimer();
 
-  bool enabled;
-  string label;
-  uint64 start_micros;
-  TimerStats* timer_stats;
+ private:
+  bool enabled_;
+  const char* file_;
+  int line_;
+  string label_;
+  uint64 start_micros_;
+  TimerStats* timer_stats_;
 };
 
 // Given a vector<T>, returns a Span<char> that points at its
@@ -320,39 +328,6 @@ Status ResourceExhaustedStrCat(Args&&... concat) {
 // uniformly replaced with "indentation".
 string Reindent(absl::string_view original, absl::string_view indentation);
 
-// Checks whether permutation is a permutation of the [0, rank) integer range.
-bool IsPermutation(absl::Span<const int64> permutation, int64 rank);
-
-// Applies `permutation` on `input` and returns the permuted array.
-// For each i, output[permutation[i]] = input[i].
-//
-// Precondition:
-// 1. `permutation` is a permutation of 0..permutation.size()-1.
-// 2. permutation.size() == input.size().
-template <typename Container>
-std::vector<typename Container::value_type> Permute(
-    absl::Span<const int64> permutation, const Container& input) {
-  using T = typename Container::value_type;
-  absl::Span<const T> data(input);
-  CHECK(IsPermutation(permutation, data.size()));
-  std::vector<T> output(data.size());
-  for (size_t i = 0; i < permutation.size(); ++i) {
-    output[permutation[i]] = data[i];
-  }
-  return output;
-}
-
-// Inverts a permutation, i.e., output_permutation[input_permutation[i]] = i.
-std::vector<int64> InversePermutation(
-    absl::Span<const int64> input_permutation);
-
-// Composes two permutations: output[i] = p1[p2[i]].
-std::vector<int64> ComposePermutations(absl::Span<const int64> p1,
-                                       absl::Span<const int64> p2);
-
-// Returns true iff permutation == {0, 1, 2, ...}.
-bool IsIdentityPermutation(absl::Span<const int64> permutation);
-
 template <typename Container>
 int64 PositionInContainer(const Container& container, int64 value) {
   return std::distance(container.begin(), absl::c_find(container, value));
@@ -397,6 +372,18 @@ template <typename T = int>
 string VectorString(const std::initializer_list<T>& c) {
   return VectorString<std::initializer_list<T>>(c);
 }
+
+// Returns a string which can losslessly round trip to a bfloat.
+string RoundTripFpToString(tensorflow::bfloat16 value);
+
+// Returns a string which can losslessly round trip to a fp16.
+string RoundTripFpToString(Eigen::half value);
+
+// Returns a string which can losslessly round trip to a float.
+string RoundTripFpToString(float value);
+
+// Returns a string which can losslessly round trip to a double.
+string RoundTripFpToString(double value);
 
 // Returns a PaddingConfig object that represents no padding for the given rank.
 PaddingConfig MakeNoPaddingConfig(int64 rank);
@@ -482,10 +469,24 @@ int64 Product(absl::Span<const int64> xs);
 //         b[j_k] × b[j_k + 1] × ... × b[j_(k+1) - 1]
 // where `CommonFactors(a, b)[CommonFactors(a, b).size - 1] = (a.size, b.size)`
 //
-// If the given shapes have non-zero size, returns the bounds of the shortest
-// possible such subsequences; else, returns `{(0, 0), (a.size, b.size)}`.
-std::vector<std::pair<int64, int64>> CommonFactors(absl::Span<const int64> a,
-                                                   absl::Span<const int64> b);
+// If input and output are the same, return {(0, 0), {1, 1}, ... {a.size,
+// b.size}}, otherwise if the given shapes have non-zero size, returns the
+// bounds of the shortest possible such subsequences; else, returns `{(0, 0),
+// (a.size, b.size)}`.
+absl::InlinedVector<std::pair<int64, int64>, 8> CommonFactors(
+    absl::Span<const int64> a, absl::Span<const int64> b);
+
+struct ConvertedDimensionNumbers {
+  DimensionVector transformed_from_dimensions;
+  DimensionVector untransformed_from_dimensions;
+  DimensionVector to_dimensions;
+};
+
+// Convert and unsorted list of dimensions from one shapes dimension sizes to
+// another shapes dimensions sizes.
+ConvertedDimensionNumbers ConvertDimensionNumbers(
+    absl::Span<const int64> from_dimensions, absl::Span<const int64> from_sizes,
+    absl::Span<const int64> to_sizes);
 
 // Removes illegal characters from filenames.
 string SanitizeFileName(string file_name);
@@ -507,7 +508,7 @@ void EraseAt(C* c, int64 index) {
 }
 
 template <typename T>
-std::vector<T> ArraySliceToVector(absl::Span<const T> slice) {
+std::vector<T> SpanToVector(absl::Span<const T> slice) {
   return std::vector<T>(slice.begin(), slice.end());
 }
 
@@ -535,6 +536,16 @@ Status EraseElementFromVector(std::vector<T>* container, const T& value) {
   container->erase(it);
   return Status::OK();
 }
+
+// Utility function which splits a double-precision float (F64) into a pair of
+// single-precision floating point numbers. The most significant 49 bits (out of
+// the total 53 available) in the mantissa of the F64 is represented as the
+// unevaluated sum of two non-overlapping single-precision F32s; the 'high' part
+// contains 24 bits in its mantissa, and the 'low' part contains 25 bits in its
+// sign bit and its mantissa.
+// Note: The resulting representation can still only represent 8-bit exponent
+// range that is available in F32s (out of a total of 11 exponent bits in F64s).
+std::pair<float, float> SplitF64ToF32(double x);
 
 // MakeCleanup(f) returns an RAII cleanup object that calls 'f' in its
 // destructor. The easiest way to use MakeCleanup is with a lambda argument,

@@ -350,8 +350,8 @@ __global__ void lstm_gates_bprop(
   di[cid] = di_local;
 
   dgates[gid + 0 * cell_size] = di_local;
-  dgates[gate_c_offset(gate_layout, cell_size)] = dci_local;
-  dgates[gate_f_offset(gate_layout, cell_size)] = df_local;
+  dgates[gid + gate_c_offset(gate_layout, cell_size)] = dci_local;
+  dgates[gid + gate_f_offset(gate_layout, cell_size)] = df_local;
   dgates[gid + 3 * cell_size] = do_local;
 
   cs_prev_grad[cid] = dcs_local * f_local;
@@ -468,7 +468,8 @@ void LSTMBlockCellBpropWithCUDA(
   template struct TensorCopyToUnaligned<GPUDevice, T>; \
   template struct TensorAdd<GPUDevice, T>;             \
                                                        \
-  DECLARE_GPU_FBPROP(T, ICFO);
+  DECLARE_GPU_FBPROP(T, ICFO);                         \
+  DECLARE_GPU_FBPROP(T, IFCO);
 
 DECLARE_GPU_SPECS(Eigen::half);
 DECLARE_GPU_SPECS(float);

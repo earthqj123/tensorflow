@@ -3,7 +3,7 @@
 load("@build_bazel_rules_android//android:rules.bzl", "android_binary")
 
 package(
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 android_binary(
@@ -11,7 +11,6 @@ android_binary(
     srcs = [
         "OvicBenchmarkerActivity.java",
     ],
-    aapt_version = "aapt2",
     assets = [
         "//tensorflow/lite/java/ovic/src/testdata:coco_labels.txt",
         "//tensorflow/lite/java/ovic/src/testdata:labels.txt",

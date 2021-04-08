@@ -26,6 +26,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/ops_testutil.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
@@ -60,6 +61,15 @@ class FingerprintOpTest : public OpsTestBase {
   Tensor method_;
 };
 
+TEST_F(FingerprintOpTest, Empty) {
+  Tensor tensor(DT_UINT8, {0});
+
+  TF_ASSERT_OK(MakeFingerprintOp(&tensor));
+  TF_ASSERT_OK(RunOpKernel());
+  EXPECT_EQ(GetOutput(0)->shape(), (TensorShape{0, 8}));
+  EXPECT_EQ(GetOutput(0)->tensor_data(), "");
+}
+
 // This test detects changes in fingerprint method.
 TEST_F(FingerprintOpTest, GoldenValue) {
   Tensor tensor(DT_UINT8, {1, 3, 4, 5, 6, 7});
@@ -82,10 +92,10 @@ TEST_F(FingerprintOpTest, StringGoldenValue) {
   buffer(1).resize(7);
   buffer(2).resize(0);
   buffer(3).resize(19);
-  std::iota(buffer(0).begin(), buffer(0).end(), 0);
-  std::iota(buffer(1).begin(), buffer(1).end(), 7);
-  std::iota(buffer(2).begin(), buffer(2).end(), 71);
-  std::iota(buffer(3).begin(), buffer(3).end(), 41);
+  std::iota(&buffer(0)[0], &buffer(0)[0] + buffer(0).size(), 0);
+  std::iota(&buffer(1)[0], &buffer(1)[0] + buffer(1).size(), 7);
+  std::iota(&buffer(2)[0], &buffer(2)[0] + buffer(2).size(), 71);
+  std::iota(&buffer(3)[0], &buffer(3)[0] + buffer(3).size(), 41);
 
   TF_ASSERT_OK(MakeFingerprintOp(&data));
   TF_ASSERT_OK(RunOpKernel());
@@ -137,7 +147,7 @@ TEST_F(FingerprintOpTest, CollisionString) {
   auto& input = tensor.vec<tstring>()(0);
   input.resize(size);
 
-  TTypes<uint8>::UnalignedFlat buffer(reinterpret_cast<uint8*>(&*input.begin()),
+  TTypes<uint8>::UnalignedFlat buffer(reinterpret_cast<uint8*>(&input[0]),
                                       input.size());
   buffer.setRandom();
 

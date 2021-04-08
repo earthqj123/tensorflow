@@ -4,7 +4,7 @@ package(
     default_visibility = [
         "//tensorflow:internal",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 py_library(
@@ -16,11 +16,13 @@ py_library(
         "pfor.py",
         "test_util.py",
     ],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
         ":control_flow_ops",
         ":gradients",
         ":test_util",
+        "//tensorflow/compiler/tf2xla/python:xla",
+        "//tensorflow/core:protos_all_py",
         "//tensorflow/python:array_ops",
         "//tensorflow/python:check_ops",
         "//tensorflow/python:constant_op",
@@ -40,6 +42,8 @@ py_library(
         "//tensorflow/python:tensor_shape",
         "//tensorflow/python:tensor_util",
         "//tensorflow/python:util",
+        "//tensorflow/python/framework:smart_cond",
+        "//tensorflow/python/ops/signal",
         "@absl_py//absl/flags",
     ],
 )
@@ -47,8 +51,9 @@ py_library(
 py_library(
     name = "pfor_lib",
     srcs = ["pfor.py"],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
+        "//tensorflow/compiler/tf2xla/python:xla",
         "//tensorflow/python:array_ops",
         "//tensorflow/python:check_ops",
         "//tensorflow/python:constant_op",
@@ -72,7 +77,7 @@ py_library(
 py_library(
     name = "control_flow_ops",
     srcs = ["control_flow_ops.py"],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     visibility = ["//visibility:public"],
     deps = [
         ":pfor_lib",
@@ -82,17 +87,19 @@ py_library(
         "//tensorflow/python:framework_ops",
         "//tensorflow/python:math_ops",
         "//tensorflow/python:tensor_array_ops",
+        "//tensorflow/python:tensor_shape",
         "//tensorflow/python:tensor_util",
         "//tensorflow/python:util",
         "//tensorflow/python/eager:context",
         "//tensorflow/python/eager:function",
+        "//tensorflow/python/ops/signal",
     ],
 )
 
 py_library(
     name = "test_util",
     srcs = ["test_util.py"],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
         ":pfor_lib",
         "//tensorflow/python:client_testlib",
@@ -105,11 +112,16 @@ py_library(
 cuda_py_test(
     name = "control_flow_ops_test",
     srcs = ["control_flow_ops_test.py"],
-    additional_deps = [
+    shard_count = 16,
+    tags = [
+        "no_rocm",
+    ],
+    deps = [
         ":control_flow_ops",
         ":test_util",
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python:client_testlib",
+        "//tensorflow/python:control_flow_v2_toggles",
         "//tensorflow/python:gradients",
         "//tensorflow/python:logging_ops",
         "//tensorflow/python:parsing_ops",
@@ -118,49 +130,55 @@ cuda_py_test(
         "//tensorflow/python:tensor_array_grad",
         "//tensorflow/python:util",
     ],
-    tags = ["no_rocm"],
-    xla_enable_strict_auto_jit = True,
 )
 
 cuda_py_test(
     name = "xla_control_flow_ops_test",
     srcs = ["xla_control_flow_ops_test.py"],
-    additional_deps = [
-        ":control_flow_ops",
-        ":test_util",
-        "//tensorflow/python/compiler/xla:xla",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:math_ops",
-    ],
     tags = [
-        "no_rocm",
         # XLA is not enabled by default on Mac or Windows.
         "no_mac",
         "no_windows",
+        "nogpu",  # TODO(b/155761551): Flaky on GPU on TAP
+        "no_tfrt",  # Note: Legacy XLA test, which depends on EncapsulateXlaComputationsPass.
     ],
-    xla_enable_strict_auto_jit = True,
     xla_enabled = True,
+    deps = [
+        ":control_flow_ops",
+        ":test_util",
+        "//tensorflow/compiler/tf2xla/python:xla",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:constant_op",
+        "//tensorflow/python:control_flow_v2_toggles",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:random_ops",
+        "//tensorflow/python/compiler/xla",
+    ],
 )
 
 cuda_py_test(
     name = "array_test",
     srcs = ["array_test.py"],
-    additional_deps = [
+    tags = [
+        "notsan",  # TODO(b/170999669): Data race
+    ],
+    deps = [
         ":control_flow_ops",
         ":test_util",
-        "//tensorflow/python:client_testlib",
         "//tensorflow/python:array_ops",
+        "//tensorflow/python:client_testlib",
         "//tensorflow/python:random_ops",
         "//tensorflow/python:util",
         "//tensorflow/python/eager:backprop",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
 cuda_py_test(
     name = "math_test",
     srcs = ["math_test.py"],
-    additional_deps = [
+    shard_count = 5,
+    tags = ["optonly"],  # Too slow in non-opt mode
+    deps = [
         ":control_flow_ops",
         ":test_util",
         "//tensorflow/python:client_testlib",
@@ -168,15 +186,12 @@ cuda_py_test(
         "//tensorflow/python:random_ops",
         "//tensorflow/python:util",
     ],
-    shard_count = 5,
-    tags = ["optonly"],  # Too slow in non-opt mode
-    xla_enable_strict_auto_jit = True,
 )
 
 py_library(
     name = "gradients",
     srcs = ["gradients.py"],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
         ":control_flow_ops",
         "//tensorflow/python:array_ops",
@@ -188,17 +203,16 @@ py_library(
 cuda_py_test(
     name = "gradients_test",
     srcs = ["gradients_test.py"],
-    additional_deps = [
+    tags = ["optonly"],  # Too slow in non-opt mode
+    deps = [
         ":control_flow_ops",
         ":gradients",
-        "//third_party/py/numpy",
-        "//tensorflow/python:layers",
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:control_flow_ops",
         "//tensorflow/python:functional_ops",
+        "//tensorflow/python:layers",
         "//tensorflow/python:random_ops",
         "//tensorflow/python/ops/losses",
+        "//third_party/py/numpy",
     ],
-    tags = ["optonly"],  # Too slow in non-opt mode
-    xla_enable_strict_auto_jit = True,
 )

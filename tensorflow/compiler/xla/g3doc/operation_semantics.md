@@ -29,34 +29,120 @@ Arguments  | Type    | Semantics
 ---------- | ------- | -------------------------
 `operands` | `XlaOp` | variadic number of tokens
 
+## AllGather
+
+See also
+[`XlaBuilder::AllGather`](https://www.tensorflow.org/code/tensorflow/compiler/xla/client/xla_builder.h).
+
+Performs concatenation across replicas.
+
+<b> `AllGather(operand, all_gather_dim, shard_count, replica_group_ids,
+channel_id)` </b>
+
+| Arguments        | Type                 | Semantics                   |
+| ---------------- | -------------------- | --------------------------- |
+| `operand`        | `XlaOp`              | Array to concatenate across |
+:                  :                      : replicas.                   :
+| `all_gather_dim` | `int64`              | Concatenation dimension.    |
+| `replica_groups` | vector of vectors of | Groups between which the    |
+:                  : `int64`              : concatenation is performed. :
+| `channel_id`     | optional `int64`     | Optional channel ID for     |
+:                  :                      : cross-module communication. :
+
+-   `replica_groups` is a list of replica groups between which the concatenation
+    is performed (replica id for the current replica can be retrieved using
+    [`ReplicaId`](#replicaid)). The order of replicas in each group determines
+    the order in which their inputs are located in the result. `replica_groups`
+    must either be empty (in which case all replicas belong to a single group,
+    ordered from `0` to `N - 1`), or contain the same number of elements as the
+    number of replicas. For example, `replica_groups = {0, 2}, {1, 3}` performs
+    concatenation between the replicas `0` and `2`, and `1` and `3`.
+-   `shard_count` is the size of each replica group. We need this in cases where
+    `replica_groups` are empty.
+-   `channel_id` is used for cross-module communication: only `all-gather`
+    operations with the same `channel_id` can communicate to each other.
+
+The output shape is the input shape with the `all_gather_dim` made `shard_count`
+times larger. For example, if there are two replicas and the operand has the
+value `[1.0, 2.5]` and `[3.0, 5.25]` respectively on the two replicas, then the
+output value from this op where `all_gather_dim` is `0` will be `[1.0, 2.5, 3.0,
+5.25]` on both replicas.
+
+## AllReduce
+
+See also
+[`XlaBuilder::AllReduce`](https://www.tensorflow.org/code/tensorflow/compiler/xla/client/xla_builder.h).
+
+Performs a custom computation across replicas.
+
+<b> `AllReduce(operand, computation, replica_group_ids, channel_id)` </b>
+
+| Arguments        | Type                 | Semantics                         |
+| ---------------- | -------------------- | --------------------------------- |
+| `operand`        | `XlaOp`              | Array or a non-empty tuple of     |
+:                  :                      : arrays to reduce across replicas. :
+| `computation`    | `XlaComputation`     | Reduction computation             |
+| `replica_groups` | vector of vectors of | Groups between which the          |
+:                  : `int64`              : reductions are performed          :
+| `channel_id`     | optional `int64`     | Optional channel ID for           |
+:                  :                      : cross-module communication        :
+
+-   When `operand` is a tuple of arrays, the all-reduce is performed on each
+    element of the tuple.
+-   `replica_groups` is a list of replica groups between which the reduction is
+    performed (replica id for the current replica can be retrieved using
+    [`ReplicaId`](#replicaid)). `replica_groups` must either be empty (in which
+    case all replicas belong to a single group), or contain the same number of
+    elements as the number of replicas. For example, `replica_groups = {0, 2},
+    {1, 3}` performs reduction between the replicas `0` and `2`, and `1` and
+    `3`.
+-   `channel_id` is used for cross-module communication: only `all-reduce`
+    operations with the same `channel_id` can communicate to each other.
+
+The output shape is the same as the input shape. For example, if there are two
+replicas and the operand has the value `[1.0, 2.5]` and `[3.0, 5.25]`
+respectively on the two replicas, then the output value from this op and
+summation computation will be `[4.0, 7.75]` on both replicas. If the input is a
+tuple, the output is a tuple as well.
+
+Computing the result of `AllReduce` requires having one input from each replica,
+so if one replica executes a `AllReduce` node more times than another, then the
+former replica will wait forever. Since the replicas are all running the same
+program, there are not a lot of ways for that to happen, but it is possible when
+a while loop's condition depends on data from infeed and the data that is infed
+causes the while loop to iterate more times on one replica than another.
+
 ## AllToAll
 
 See also
 [`XlaBuilder::AllToAll`](https://www.tensorflow.org/code/tensorflow/compiler/xla/client/xla_builder.h).
 
-Alltoall is a collective operation that sends data from all cores to all cores.
+AllToAll is a collective operation that sends data from all cores to all cores.
 It has two phases:
 
-1.  the scatter phase. On each core, the operand is split into `split_count`
-number of blocks along the `split_dimensions`, and the blocks are scattered
-to all cores, e.g., the ith block is send to the ith core.
-2.  the gather phase. Each core concatenates the received blocks along the
-`concat_dimension`.
+1.  The scatter phase. On each core, the operand is split into `split_count`
+    number of blocks along the `split_dimensions`, and the blocks are scattered
+    to all cores, e.g., the ith block is send to the ith core.
+2.  The gather phase. Each core concatenates the received blocks along the
+    `concat_dimension`.
 
 The participating cores can be configured by:
 
--   `replica_groups`: each ReplicaGroup contains a list of replica id. If empty,
-all replicas belong to one group in the order of 0 - (n-1). Alltoall will be
-applied within subgroups in the specified order. For example, replica
-groups = {{1,2,3},{4,5,0}} means, an Alltoall will be applied within replica
-1, 2, 3, and in the gather phase, the received blocks will be concatenated
-in the order of 1, 2, 3; another Alltoall will be applied within replica 4,
-5, 0, and the concatenation order is 4, 5, 0.
+-   `replica_groups`: each ReplicaGroup contains a list of replica id
+    participating in the computation (replica id for the current replica can be
+    retrieved using [`ReplicaId`](#replicaid)). AllToAll will be applied within
+    subgroups in the specified order. For example, `replica_groups = {{1,2,3},
+    {4,5,0}}` means that an AllToAll will be applied within replicas `{1, 2,
+    3}`, and in the gather phase, and the received blocks will be concatenated
+    in the same order of 1, 2, 3. Then, another AllToAll will be applied within
+    replicas 4, 5, 0, and the concatenation order is also 4, 5, 0. If
+    `replica_groups` is empty, all replicas belong to one group, in the
+    concatenation order of their appearance.
 
 Prerequisites:
 
--   The dimension size of the operand on the split_dimension is divisible by
-split_count.
+-   The dimension size of the operand on the `split_dimension` is divisible by
+`split_count`.
 -   The operand's shape is not tuple.
 
 <b> `AllToAll(operand, split_dimension, concat_dimension, split_count,
@@ -135,7 +221,7 @@ respect to `operand`, `offset` and `scale` across all the other dimensions. The
 `feature_index` must be a valid index for the feature dimension in `operand`.
 
 The three gradients are defined by the following formulas (assuming a
-4-dimensional array as `operand` and with feature dimension index $$l$$, batch
+4-dimensional array as `operand` and with feature dimension index `l`, batch
 size `m` and spatial sizes `w` and `h`):
 
 \\[ \begin{split} c_l&=
@@ -328,7 +414,7 @@ The `operand` is broadcast to the shape described by `out_dim_size`.
 `broadcast_dimensions` maps the dimensions of `operand` to the dimensions of the
 target shape, i.e. the i'th dimension of the operand is mapped to the
 broadcast_dimension\[i\]'th dimension of the output shape. The dimensions of
-`operand` must have size 1 or be the same size as the dimension in in the output
+`operand` must have size 1 or be the same size as the dimension in the output
 shape they are mapped to. The remaining dimensions are filled with dimensions of
 size 1. Degenerate-dimension broadcasting then broadcasts along these degenerate
 dimensions to reach the output shape. The semantics are described in detail on
@@ -346,7 +432,7 @@ Invokes a computation with the given arguments.
 | Arguments     | Type                   | Semantics                           |
 | ------------- | ---------------------- | ----------------------------------- |
 | `computation` | `XlaComputation`       | computation of type `T_0, T_1, ..., |
-:               :                        : T_N -> S` with N parameters of      :
+:               :                        : T_{N-1} -> S` with N parameters of  :
 :               :                        : arbitrary type                      :
 | `args`        | sequence of N `XlaOp`s | N arguments of arbitrary type       |
 
@@ -571,36 +657,44 @@ See also
 <b> `Conditional(pred, true_operand, true_computation, false_operand,
 false_computation)` </b>
 
+<!-- mdformat off(disable mdformat for proper MathJax formatting) -->
+
 Arguments           | Type             | Semantics
-------------------- | ---------------- | --------------------------------------
+------------------- | ---------------- | ------------------------------------
 `pred`              | `XlaOp`          | Scalar of type `PRED`
-`true_operand`      | `XlaOp`          | Argument of type $$ T_0 $$
-`true_computation`  | `XlaComputation` | XlaComputation of type $$ T_0 \to S$$
-`false_operand`     | `XlaOp`          | Argument of type $$ T_1 $$
-`false_computation` | `XlaComputation` | XlaComputation of type $$ T_1 \to S $$
+`true_operand`      | `XlaOp`          | Argument of type \\(T_0\\)
+`true_computation`  | `XlaComputation` | XlaComputation of type \\(T_0 \to S\\)
+`false_operand`     | `XlaOp`          | Argument of type \\(T_1\\)
+`false_computation` | `XlaComputation` | XlaComputation of type \\(T_1 \to S\\)
 
 Executes `true_computation` if `pred` is `true`, `false_computation` if `pred`
 is `false`, and returns the result.
 
-The `true_computation` must take in a single argument of type $$ T_0 $$ and will
+The `true_computation` must take in a single argument of type \\(T_0\\) and will
 be invoked with `true_operand` which must be of the same type. The
-`false_computation` must take in a single argument of type $$ T_1 $$ and will be
+`false_computation` must take in a single argument of type \\(T_1\\) and will be
 invoked with `false_operand` which must be of the same type. The type of the
 returned value of `true_computation` and `false_computation` must be the same.
+
+<!-- mdformat on -->
 
 Note that only one of `true_computation` and `false_computation` will be
 executed depending on the value of `pred`.
 
 <b> `Conditional(branch_index, branch_computations, branch_operands)` </b>
 
+<!-- mdformat off(disable mdformat for proper MathJax formatting) -->
+
 | Arguments             | Type                  | Semantics                    |
 | --------------------- | --------------------- | ---------------------------- |
 | `branch_index`        | `XlaOp`               | Scalar of type `S32`         |
-| `branch_computations` | sequence of N         | XlaComputations of type $$   |
+| `branch_computations` | sequence of N         | XlaComputations of type \\(  |
 :                       : `XlaComputation`      : T_0 \to S , T_1 \to S , ..., :
-:                       :                       : T_{N-1} \to S $$             :
-| `branch_operands`     | sequence of N `XlaOp` | Arguments of type $$ T_0 ,   |
-:                       :                       : T_1 , ..., T_{N-1} $$        :
+:                       :                       : T_{N-1} \to S \\)            :
+| `branch_operands`     | sequence of N `XlaOp` | Arguments of type \\( T_0 ,  |
+:                       :                       : T_1 , ..., T_{N-1} \\)       :
+
+<!-- mdformat on -->
 
 Executes `branch_computations[branch_index]`, and returns the result. If
 `branch_index` is an `S32` which is < 0 or >= N, then `branch_computations[N-1]`
@@ -718,17 +812,12 @@ input feature dimension, and the filter would be reshaped from
 `[filter_height, filter_width, 1, in_channels * channel_multiplier]`. For more
 details, see `tf.nn.depthwise_conv2d`.
 
-The `batch_group_count` (default value 1) argument can be used for depthwise
+The `batch_group_count` (default value 1) argument can be used for grouped
 filters during backpropagation. `batch_group_count` needs to be a divisor of the
 size of the `lhs` (input) batch dimension. If `batch_group_count` is greater
-than 1, it means that the output batch dimension should be of size
-`batch_group_size` where `batch_group_size = input batch / batch_group_count`.
-For convolutions with `batch_group_count` greater than 1, the input batch size
-must evenly divide into batch_group_size and output feature size, which implies
-that the output feature size must be equal to batch_group_count. Conceptually,
-this can be achieved by performing the usual convolution, and then scraping
-`batch_group_size` number of elements on the diagonal of the matrix formed by
-output batch and output feature.
+than 1, it means that the output batch dimension should be of size `input batch
+/ batch_group_count`. The `batch_group_count` must be a divisor of the output
+feature size.
 
 The output shape has these dimensions, in this order:
 
@@ -761,15 +850,15 @@ Here is pseudo-code for a 2d convolution with padding and striding:
 
 ```
 for (b, oz, oy, ox) {  // output coordinates
-value = 0;
-for (iz, ky, kx) {  // kernel coordinates and input z
-iy = oy*stride_y + ky - pad_low_y;
-ix = ox*stride_x + kx - pad_low_x;
-if ((iy, ix) inside the base area considered without padding) {
-value += input(b, iz, iy, ix) * kernel(oz, iz, ky, kx);
-}
-}
-output(b, oz, oy, ox) = value;
+  value = 0;
+  for (iz, ky, kx) {  // kernel coordinates and input z
+    iy = oy*stride_y + ky - pad_low_y;
+    ix = ox*stride_x + kx - pad_low_x;
+    if ((iy, ix) inside the base area considered without padding) {
+      value += input(b, iz, iy, ix) * kernel(oz, iz, ky, kx);
+    }
+  }
+  output(b, oz, oy, ox) = value;
 }
 ```
 
@@ -809,38 +898,7 @@ then b == f32[3]{0.0, 1.0, 2.0}
 
 ## CrossReplicaSum
 
-See also
-[`XlaBuilder::CrossReplicaSum`](https://www.tensorflow.org/code/tensorflow/compiler/xla/client/xla_builder.h).
-
-Computes a sum across replicas.
-
-<b> `CrossReplicaSum(operand)` </b>
-
-Arguments | Type    | Semantics
---------- | ------- | -----------------------------
-`operand` | `XlaOp` | Array to sum across replicas.
-| `replica_group_ids`    | `int64` vector | Group ID for each replica.      |
-
-The output shape is the same as the input shape. For example, if there are two
-replicas and the operand has the value `(1.0, 2.5)` and `(3.0, 5.25)`
-respectively on the two replicas, then the output value from this op will be
-`(4.0, 7.75)` on both replicas.
-
-`replica_group_ids` identifies the group ID of each replica. The group ID must
-either be empty (all replicas belong to a single group), or contain the same
-number of elements as the number of replicas. For example, if
-`replica_group_ids` = {0, 1, 2, 3, 0, 1, 2, 3} has eight replicas, there are
-four subgroups of replica IDs: {0, 4}, {1, 5}, {2, 6}, and {3, 7}. The size of
-each subgroup *must* be identical, so, for example, using:
-`replica_group_ids` = {0, 1, 2, 0} for four replicas is invalid.
-
-Computing the result of CrossReplicaSum requires having one input from each
-replica, so if one replica executes a CrossReplicaSum node more times than
-another, then the former replica will wait forever. Since the replicas are all
-running the same program, there are not a lot of ways for that to happen, but it
-is possible when a while loop's condition depends on data from infeed and the
-data that is infed causes the while loop to iterate more times on one replica
-than another.
+Performs `AllReduce` with a summation computation.
 
 ## CustomCall
 
@@ -880,19 +938,19 @@ Here is an example of an implementation of `myfunc`:
 
 ```
 extern "C" void myfunc(void* out, void** in) {
-float (&x)[2] = *static_cast<float(*)[2]>(in[0]);
-float (&y)[2][3] = *static_cast<float(*)[2][3]>(in[1]);
-EXPECT_EQ(1, x[0]);
-EXPECT_EQ(2, x[1]);
-EXPECT_EQ(10, y[0][0]);
-EXPECT_EQ(20, y[0][1]);
-EXPECT_EQ(30, y[0][2]);
-EXPECT_EQ(40, y[1][0]);
-EXPECT_EQ(50, y[1][1]);
-EXPECT_EQ(60, y[1][2]);
-float (&z)[3][3] = *static_cast<float(*)[3][3]>(out);
-z[0][0] = x[1] + y[1][0];
-// ...
+  float (&x)[2] = *static_cast<float(*)[2]>(in[0]);
+  float (&y)[2][3] = *static_cast<float(*)[2][3]>(in[1]);
+  EXPECT_EQ(1, x[0]);
+  EXPECT_EQ(2, x[1]);
+  EXPECT_EQ(10, y[0][0]);
+  EXPECT_EQ(20, y[0][1]);
+  EXPECT_EQ(30, y[0][2]);
+  EXPECT_EQ(40, y[1][0]);
+  EXPECT_EQ(50, y[1][1]);
+  EXPECT_EQ(60, y[1][2]);
+  float (&z)[3][3] = *static_cast<float(*)[3][3]>(out);
+  z[0][0] = x[1] + y[1][0];
+  // ...
 }
 ```
 
@@ -943,7 +1001,7 @@ Arguments           | Type                  | Semantics
 ------------------- | --------------------- | ---------------
 `lhs`               | `XlaOp`               | array of type T
 `rhs`               | `XlaOp`               | array of type T
-`dimension_numbers` | `DotDimensionNumbers` | array of type T
+`dimension_numbers` | `DotDimensionNumbers` | contracting and batch dimension numbers
 
 As Dot, but allows contracting and batch dimension numbers to be specified for
 both the 'lhs' and 'rhs'.
@@ -959,7 +1017,7 @@ DotGeneral performs the sum of products over contracting dimensions specified
 in 'dimension_numbers'.
 
 Associated contracting dimension numbers from the 'lhs' and 'rhs' do not need
-to be the same and but must have the same dimension sizes.
+to be the same but must have the same dimension sizes.
 
 Example with contracting dimension numbers:
 
@@ -1216,7 +1274,10 @@ floating-point types.
 
 Where `Op` is one of `Eq` (equal-to), `Ne` (not equal-to), `Ge`
 (greater-or-equal-than), `Gt` (greater-than), `Le` (less-or-equal-than), `Lt`
-(less-than).
+(less-than). Another set of operators, EqTotalOrder, NeTotalOrder, GeTotalOrder,
+GtTotalOrder, LeTotalOrder, and LtTotalOrder, provide the same functionalities,
+except that they additionally support a total order over the floating point
+numbers, by enforcing -NaN < -Inf < -Finite < -0 < +0 < +Finite < +Inf < +NaN.
 
 Arguments | Type    | Semantics
 --------- | ------- | ----------------------------------------
@@ -1257,6 +1318,9 @@ XlaBuilder supports these element-wise unary functions:
 
 <b>`Floor(operand)`</b> Element-wise floor `x -> ⌊x⌋`.
 
+<b>`Imag(operand)`</b> Element-wise imaginary part of a complex (or real)
+shape. `x -> imag(x)`. If the operand is a floating point type, returns 0.
+
 <b>`IsFinite(operand)`</b> Tests whether each element of `operand` is finite,
 i.e., is not positive or negative infinity, and is not `NaN`. Returns an array
 of `PRED` values with the same shape as the input, where each element is `true`
@@ -1266,16 +1330,29 @@ if and only if the corresponding input element is finite.
 
 <b>`LogicalNot(operand)`</b> Element-wise logical not `x -> !(x)`.
 
+<b>`Logistic(operand)`</b> Element-wise logistic function computation `x ->
+logistic(x)`.
+
 <b>`PopulationCount(operand)`</b> Computes the number of bits set in each
 element of `operand`.
 
 <b>`Neg(operand)`</b> Element-wise negation `x -> -x`.
+
+<b>`Real(operand)`</b> Element-wise real part of a complex (or real) shape.
+`x -> real(x)`. If the operand is a floating point type, returns the same value.
+
+<b>`Rsqrt(operand)`</b> Element-wise reciprocal of square root operation
+`x -> 1.0 / sqrt(x)`.
 
 <b>`Sign(operand)`</b> Element-wise sign operation `x -> sgn(x)` where
 
 $$\text{sgn}(x) = \begin{cases} -1 & x < 0\\ -0 & x = -0\\ NaN & x = NaN\\ +0 & x = +0\\ 1 & x > 0 \end{cases}$$
 
 using the comparison operator of the element type of `operand`.
+
+<b>`Sqrt(operand)`</b> Element-wise square root operation `x -> sqrt(x)`.
+
+<b>`Cbrt(operand)`</b> Element-wise cubic root operation `x -> cbrt(x)`.
 
 <b>`Tanh(operand)`</b> Element-wise hyperbolic tangent `x -> tanh(x)`.
 
@@ -1291,8 +1368,7 @@ array with the same shape. It is allowed for `operand` to be a scalar (rank 0).
 
 The XLA FFT operation implements the forward and inverse Fourier Transforms for
 real and complex inputs/outputs. Multidimensional FFTs on up to 3 axes are
-supported, except on TPU, where only a single axis is supported (please file a
-github issue if you require higher order).
+supported.
 
 See also
 [`XlaBuilder::Fft`](https://www.tensorflow.org/code/tensorflow/compiler/xla/client/xla_builder.h).
@@ -1379,6 +1455,12 @@ For a more intuitive description, see the "Informal Description" section below.
 :                        :                     : map indices in                :
 :                        :                     : `start_indices` to legal      :
 :                        :                     : indices into operand.         :
+| `indices_are_sorted`   | `bool`              | Whether the indices are       |
+:                        :                     : guaranteed to be sorted by    :
+:                        :                     : the caller.                   :
+| `unique_indices`       | `bool`              | Whether the indices are       |
+:                        :                     : guaranteed to be unique by    :
+:                        :                     : the caller.                   :
 
 For convenience, we label dimensions in the output array not in `offset_dims`
 as `batch_dims`.
@@ -1442,6 +1524,15 @@ calculated as follows:
 and range [`0`, `operand.rank`) \ `collapsed_slice_dims`. So if, e.g.,
 `offset.size` is `4`, `operand.rank` is `6` and `collapsed_slice_dims` is {`0`,
 `2`} then `remapped_offset_dims` is {`0`→`1`, `1`→`3`, `2`→`4`, `3`→`5`}.
+
+If `indices_are_sorted` is set to true then XLA can assume that `start_indices`
+are sorted (in ascending `start_index_map` order) by the user. If they are not
+then the semantics is implementation defined.
+
+If `unique_indices` is set to true then XLA can assume that all element
+scattered to are unique. So XLA could use non-atomic operations. If
+`unique_indices` is set to true and the indices being scattered to are not
+unique then the semantics is implementation defined.
 
 ### Informal Description and Examples
 
@@ -1563,6 +1654,48 @@ array shaped.
 | `dimension` | `int64` | A value in the interval `[0, n)` that specifies the |
 :             :         : dimension                                           :
 
+## SetDimensionSize
+
+See also
+[`XlaBuilder::SetDimensionSize`](https://www.tensorflow.org/code/tensorflow/compiler/xla/client/xla_builder.h).
+
+Sets the dynamic size of XlaOp's given dimension. The operand must be
+array shaped.
+
+<b> `SetDimensionSize(operand, size, dimension)` </b>
+
+| Arguments   | Type    | Semantics                                           |
+| ----------- | ------- | --------------------------------------------------- |
+| `operand`   | `XlaOp` | n dimensional input array.                          |
+| `size`      | `XlaOp` | int32 representing the runtime dynamic size.        |
+| `dimension` | `int64` | A value in the interval `[0, n)` that specifies the |
+:             :         : dimension.                                          :
+
+Pass through the operand as result, with dynamic dimension tracked by the
+compiler.
+
+Padded values will be ignored by downstream reduction ops.
+
+```
+let v: f32[10] = f32[10]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+let five: s32 = 5;
+let six: s32 = 6;
+
+// Setting dynamic dimension size doesn't change the upper bound of the static
+// shape.
+let padded_v_five: f32[10] = set_dimension_size(v, five, /*dimension=*/0);
+let padded_v_six: f32[10] = set_dimension_size(v, six, /*dimension=*/0);
+
+// sum == 1 + 2 + 3 + 4 + 5
+let sum:f32[] = reduce_sum(padded_v_five);
+// product == 1 * 2 * 3 * 4 * 5
+let product:f32[] = reduce_product(padded_v_five);
+
+// Changing padding size will yield different result.
+// sum == 1 + 2 + 3 + 4 + 5 + 6
+let sum':f32[] = reduce_sum(padded_v_six);
+```
+
 ## GetTupleElement
 
 See also
@@ -1607,11 +1740,11 @@ dependency between the while loops.
 
 ```
 result1 = while (condition, init = init_value) {
-Infeed(shape)
+  Infeed(shape)
 }
 
 result2 = while (condition, init = result1) {
-Infeed(shape)
+  Infeed(shape)
 }
 ```
 
@@ -1755,19 +1888,25 @@ Applies a reduction function to one or more arrays in parallel.
 
 <b> `Reduce(operands..., init_values..., computation, dimensions)` </b>
 
-| Arguments     | Type                  | Semantics                            |
-| ------------- | --------------------- | ------------------------------------ |
-| `operands`    | Sequence of N `XlaOp` | N arrays of types `T_0, ..., T_N`.   |
-| `init_values` | Sequence of N `XlaOp` | N scalars of types `T_0, ..., T_N`.  |
-| `computation` | `XlaComputation`      | computation of type `T_0, ..., T_N, T_0, ..., T_N ->` `Collate(T_0, ..., T_N)`. |
-| `dimensions`  | `int64` array         | unordered array of dimensions to reduce. |
+| Arguments     | Type                  | Semantics                        |
+| ------------- | --------------------- | -------------------------------- |
+| `operands`    | Sequence of N `XlaOp` | N arrays of types `T_0, ...,     |
+:               :                       : T_{N-1}`.                        :
+| `init_values` | Sequence of N `XlaOp` | N scalars of types `T_0, ...,    |
+:               :                       : T_{N-1}`.                        :
+| `computation` | `XlaComputation`      | computation of type `T_0, ...,   |
+:               :                       : T_{N-1}, T_0, ..., T_{N-1} ->`   :
+:               :                       : `Collate(T_0, ..., T_{N-1})`.    :
+| `dimensions`  | `int64` array         | unordered array of dimensions to |
+:               :                       : reduce.                          :
 
 Where:
 
-* N is required to be greater or equal to 1.
-* All input arrays must have the same dimensions.
-* If `N = 1`, `Collate(T)` is `T`.
-* If `N > 1`, `Collate(T_0, ..., T_N)` is a tuple of `N` elements of type `T`.
+*   N is required to be greater or equal to 1.
+*   All input arrays must have the same dimensions.
+*   If `N = 1`, `Collate(T)` is `T`.
+*   If `N > 1`, `Collate(T_0, ..., T_{N-1})` is a tuple of `N` elements of type
+    `T`.
 
 The output of the op is `Collate(Q_0, ..., Q_N)` where `Q_i` is an array of type
 `T_i`, the dimensions of which are described below.
@@ -1775,9 +1914,10 @@ The output of the op is `Collate(Q_0, ..., Q_N)` where `Q_i` is an array of type
 This operation reduces one or more dimensions of each input array into scalars.
 The rank of each returned array is `rank(operand) - len(dimensions)`. The
 initial value used for every reduction is `init_value`, and it may be inserted
-anywhere during computation by the back-end. In most cases, `init_value` is an
-identity of the reduction function (for example, `0` for addition). The applied
-`computation` is always passed the `init_value` on the left-hand side.
+anywhere during computation by the back-end. It is required that `init_value` is
+an identity of the reduction function (for example, `0` for addition) or
+undefined behavior will occur. The applied `computation` is always passed the
+`init_value` on the left-hand side.
 
 The evaluation order of the reduction function is arbitrary and may be
 non-deterministic. Therefore, the reduction function should not be overly
@@ -1949,28 +2089,33 @@ portion of the conversion is then simply a no-op.
 See also
 [`XlaBuilder::ReduceWindow`](https://www.tensorflow.org/code/tensorflow/compiler/xla/client/xla_builder.h).
 
-Applies a reduction function to all elements in each window of the input
-multi-dimensional array, producing an output multi-dimensional array with the
-same number of elements as the number of valid positions of the window. A
-pooling layer can be expressed as a `ReduceWindow`. Similar to
-[`Reduce`](#reduce), the applied `computation` is always passed the `init_value`
-on the left-hand side.
+Applies a reduction function to all elements in each window of a sequence of N
+multi-dimensional arrays, producing a single or a tuple of N multi-dimensional
+arrays as output. Each output array has the same number of elements as the
+number of valid positions of the window. A pooling layer can be expressed as a
+`ReduceWindow`. Similar to [`Reduce`](#reduce), the applied `computation` is
+always passed the `init_values` on the left-hand side.
 
-<b> `ReduceWindow(operand, init_value, computation, window_dimensions,
+<b> `ReduceWindow(operands..., init_values..., computation, window_dimensions,
 window_strides, padding)` </b>
 
 | Arguments           | Type                | Semantics                        |
 | ------------------- | ------------------- | -------------------------------- |
-| `operand`           | `XlaOp`             | N dimensional array containing   |
-:                     :                     : elements of type T. This is the  :
-:                     :                     : base area on which the window is :
-:                     :                     : placed.                          :
-| `init_value`        | `XlaOp`             | Starting value for the           |
-:                     :                     : reduction. See [Reduce](#reduce) :
+| `operands`          | `N XlaOps`          | A sequence of N                  |
+:                     :                     : multi-dimensional arrays of      :
+:                     :                     : types `T_0,..., T_{N-1}`, each   :
+:                     :                     : representing the base area on    :
+:                     :                     : which the window is placed.      :
+| `init_values`       | `N XlaOps`          | The N starting values for the    |
+:                     :                     : reduction, one for each of the N :
+:                     :                     : operands. See [Reduce](#reduce)  :
 :                     :                     : for details.                     :
-| `computation`       | `XlaComputation`    | Reduction function of type `T, T |
-:                     :                     : -> T`, to apply to all elements  :
-:                     :                     : in each window                   :
+| `computation`       | `XlaComputation`    | Reduction function of type `T_0, |
+:                     :                     : ..., T_{N-1}, T_0, ..., T_{N-1}  :
+:                     :                     : -> Collate(T_0, ..., T_{N-1})`,  :
+:                     :                     : to apply to elements in each     :
+:                     :                     : window of all the input          :
+:                     :                     : operands.                        :
 | `window_dimensions` | `ArraySlice<int64>` | array of integers for window     |
 :                     :                     : dimension values                 :
 | `window_strides`    | `ArraySlice<int64>` | array of integers for window     |
@@ -1984,8 +2129,16 @@ window_strides, padding)` </b>
 :                     :                     : as to have the same output shape :
 :                     :                     : as input if the stride is 1, or  :
 :                     :                     : Padding\:\:kValid, which uses no :
-:                     :                     : no padding and "stops" the       :
-:                     :                     : window once it no longer fits)   :
+:                     :                     : padding and "stops" the window   :
+:                     :                     : once it no longer fits)          :
+
+Where:
+
+*   N is required to be greater or equal to 1.
+*   All input arrays must have the same dimensions.
+*   If `N = 1`, `Collate(T)` is `T`.
+*   If `N > 1`, `Collate(T_0, ..., T_{N-1})` is a tuple of `N` elements of type
+    `(T0,...T{N-1})`.
 
 Below code and figure shows an example of using `ReduceWindow`. Input is a
 matrix of size [4x6] and both window_dimensions and window_stride_dimensions are
@@ -2207,6 +2360,40 @@ implementation-defined.
 :           :                         : limit of interval                 :
 | `shape`   | `Shape`                 | Output shape of type T            |
 
+## RngBitGenerator
+
+Generates an output with a given shape filled with uniform random bits using the
+specified algorithm (or backend default) and returns an updated state (with the
+same shape as initial state) and the generated random data.
+
+Initial state is the initial state of the current random number generation. It
+and the required shape and valid values are dependent on the algorithm used.
+
+The output is guaranteed to be a deterministic function of the initial state but
+it is *not* guaranteed to be deterministic between backends and different
+compiler versions.
+
+<b>`RngBitGenerator(algorithm, key, shape)`</b>
+
+Arguments       | Type              | Semantics
+--------------- | ----------------- | -------------------------------------
+`algorithm`     | `RandomAlgorithm` | PRNG algorithm to be used.
+`initial_state` | `XlaOp`           | Initial state for the PRNG algorithm.
+`shape`         | `Shape`           | Output shape for generated data.
+
+Available values for `algorithm`:
+
+-   `rng_default`: Backend specific algorithm with backend specific shape
+    requirements.
+
+-   `rng_three_fry`: ThreeFry counter-based PRNG algorithm. The `initial_state`
+    shape is `u64[2]` with arbitrary values.
+    [Salmon et al. SC 2011. Parallel random numbers: as easy as 1, 2, 3.](http://www.thesalmons.org/john/random123/papers/random123sc11.pdf)
+
+-   `rng_philox`: Philox algorithm to generate random numbers in parallel. The
+    `initial_state` shape is `u64[3]` with arbitrary values.
+    [Salmon et al. SC 2011. Parallel random numbers: as easy as 1, 2, 3.](http://www.thesalmons.org/john/random123/papers/random123sc11.pdf)
+
 ## Scatter
 
 The XLA scatter operation generates a result which is the value of the input
@@ -2228,6 +2415,7 @@ Arguments                      | Type                | Semantics
 `update_window_dims`           | `ArraySlice<int64>` | The set of dimensions in `updates` shape that are _window dimensions_.
 `inserted_window_dims`         | `ArraySlice<int64>` | The set of _window dimensions_ that must be inserted into `updates` shape.
 `scatter_dims_to_operand_dims` | `ArraySlice<int64>` | A dimensions map from the scatter indices to the operand index space. This array is interpreted as mapping `i` to `scatter_dims_to_operand_dims[i]` . It has to be one-to-one and total.
+`indices_are_sorted`           | `bool`              | Whether the indices are guaranteed to be sorted by the caller.
 
 If `index_vector_dim` is equal to `scatter_indices.rank` we implicitly consider
 `scatter_indices` to have a trailing `1` dimension.
@@ -2313,6 +2501,10 @@ Note that the first parameter that is passed into the `update_computation` will
 always be the current value from the `output` array and the second parameter
 will always be the value from the `updates` array. This is important
 specifically for cases when the `update_computation` is _not commutative_.
+
+If `indices_are_sorted` is set to true then XLA can assume that `start_indices`
+are sorted (in ascending `start_index_map` order) by the user. If they are not
+then the semantics is implementation defined.
 
 Informally, the scatter op can be viewed as an _inverse_ of the gather op, i.e.
 the scatter op updates the elements in the input that are extracted by the

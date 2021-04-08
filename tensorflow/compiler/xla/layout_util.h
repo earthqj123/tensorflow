@@ -45,13 +45,13 @@ class LayoutUtil {
   static Layout MakeLayoutFromMajorToMinor(
       absl::Span<const int64> major_to_minor);
 
-  // Returns a layout with descending ((i.e. {n, n-1, ..., 0}) minor-to-major
+  // Returns a layout with descending ((i.e. {n-1, n-2, ... 0}) minor-to-major
   // dimensions.
   static Layout MakeDescendingLayout(int64 rank);
 
-  // Creates a sparse layout with the given maximum number of elements. (This is
-  // a convenience function for protobuf construction.)
-  static Layout MakeSparseLayout(int64 max_sparse_elements);
+  // Returns a layout with ascending ((i.e. {0, 1, ... n-1}) minor-to-major
+  // dimensions.
+  static Layout MakeAscendingLayout(int64 rank);
 
   // Returns default layout for the given shape.
   static Layout GetDefaultLayoutForShape(const Shape& shape);
@@ -108,17 +108,6 @@ class LayoutUtil {
   // * R2+: equivalent to row-major. Dimension 0 is the major, dimension 1 is
   //        more minor, and so on until dimension N-1 which is the minor.
   static bool IsMonotonicWithDim0Major(const Layout& layout);
-
-  // Returns whether the given Shape is an array (i.e. not a tuple) and has a
-  // sparse format layout.
-  static bool IsSparseArray(const Shape& shape);
-
-  // Returns whether the given Layout has a sparse format.
-  static bool IsSparse(const Layout& layout);
-
-  // Returns the maximum number of elements that can be stored in a sparse
-  // layout.
-  static int64 MaxSparseElements(const Layout& layout);
 
   // Returns whether the given shape has a layout. For tuple shapes, true is
   // returned only if all elements have layouts.
@@ -191,6 +180,10 @@ class LayoutUtil {
   // not necessarily in the order given.
   static bool AreDimensionsConsecutive(const Layout& layout,
                                        absl::Span<const int64> dims);
+
+  // Constructs a new layout by making the given dimension `dim` in the given
+  // layout `layout` as the most major dimension.
+  static Layout MoveDimToMajor(const Layout& layout, int64 dim);
 
   // Compute a hash for `layout`.
   static size_t Hash(const Layout& layout);

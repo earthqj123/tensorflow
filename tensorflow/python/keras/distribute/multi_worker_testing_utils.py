@@ -14,15 +14,15 @@
 # ==============================================================================
 """Utilities for testing multi-worker distribution strategies with Keras."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 from tensorflow.python import keras
 from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.distribute import multi_worker_test_base
+from tensorflow.python.distribute.cluster_resolver import SimpleClusterResolver
 from tensorflow.python.framework import dtypes
 from tensorflow.python.keras.optimizer_v2 import gradient_descent
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import random_ops
+from tensorflow.python.training.server_lib import ClusterSpec
 
 
 def mnist_synthetic_dataset(batch_size, steps_per_epoch):
@@ -44,7 +44,6 @@ def mnist_synthetic_dataset(batch_size, steps_per_epoch):
                                      maxval=9,
                                      dtype=dtypes.int32)
   eval_ds = dataset_ops.Dataset.from_tensor_slices((x_test, y_test))
-  eval_ds = eval_ds.repeat()
   eval_ds = eval_ds.batch(64, drop_remainder=True)
 
   return train_ds, eval_ds
@@ -52,21 +51,19 @@ def mnist_synthetic_dataset(batch_size, steps_per_epoch):
 
 def get_mnist_model(input_shape):
   """Define a deterministically-initialized CNN model for MNIST testing."""
-  model = keras.models.Sequential()
-  model.add(
-      keras.layers.Conv2D(
-          32,
-          kernel_size=(3, 3),
-          activation="relu",
-          input_shape=input_shape,
-          kernel_initializer=keras.initializers.TruncatedNormal(seed=99)))
-  model.add(keras.layers.BatchNormalization())
-  model.add(keras.layers.Flatten())
-  model.add(
-      keras.layers.Dense(
-          10,
-          activation="softmax",
-          kernel_initializer=keras.initializers.TruncatedNormal(seed=99)))
+  inputs = keras.Input(shape=input_shape)
+  x = keras.layers.Conv2D(
+      32,
+      kernel_size=(3, 3),
+      activation="relu",
+      kernel_initializer=keras.initializers.TruncatedNormal(seed=99))(inputs)
+  x = keras.layers.BatchNormalization()(x)
+  x = keras.layers.Flatten()(x) + keras.layers.Flatten()(x)
+  x = keras.layers.Dense(
+      10,
+      activation="softmax",
+      kernel_initializer=keras.initializers.TruncatedNormal(seed=99))(x)
+  model = keras.Model(inputs=inputs, outputs=x)
 
   # TODO(yuefengz): optimizer with slot variables doesn't work because of
   # optimizer's bug.
@@ -76,3 +73,9 @@ def get_mnist_model(input_shape):
       optimizer=gradient_descent.SGD(learning_rate=0.001),
       metrics=["accuracy"])
   return model
+
+
+def make_parameter_server_cluster(num_workers, num_ps):
+  cluster_def = multi_worker_test_base.create_in_process_cluster(
+      num_workers=num_workers, num_ps=num_ps, rpc_layer="grpc")
+  return SimpleClusterResolver(ClusterSpec(cluster_def), rpc_layer="grpc")

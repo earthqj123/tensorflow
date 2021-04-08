@@ -19,15 +19,14 @@ limitations under the License.
 #include <stdio.h>
 #include <stdlib.h>
 
+namespace tflite {
+namespace jni {
+
 const char kIllegalArgumentException[] = "java/lang/IllegalArgumentException";
 const char kIllegalStateException[] = "java/lang/IllegalStateException";
 const char kNullPointerException[] = "java/lang/NullPointerException";
-const char kIndexOutOfBoundsException[] = "java/lang/IndexOutOfBoundsException";
 const char kUnsupportedOperationException[] =
     "java/lang/UnsupportedOperationException";
-
-namespace tflite {
-namespace jni {
 
 void ThrowException(JNIEnv* env, const char* clazz, const char* fmt, ...) {
   va_list args;
@@ -63,6 +62,11 @@ BufferErrorReporter::~BufferErrorReporter() { delete[] buffer_; }
 
 int BufferErrorReporter::Report(const char* format, va_list args) {
   int size = 0;
+  // If an error has already been logged, insert a newline.
+  if (start_idx_ > 0 && start_idx_ < end_idx_) {
+    buffer_[start_idx_++] = '\n';
+    ++size;
+  }
   if (start_idx_ < end_idx_) {
     size = vsnprintf(buffer_ + start_idx_, end_idx_ - start_idx_, format, args);
   }

@@ -34,7 +34,7 @@ class _LazyLoader(_types.ModuleType):
   """Lazily import a module so that we can forward it."""
 
   # The lint error here is incorrect.
-  def __init__(self, local_name, parent_module_globals, name):  # pylint: disable=super-on-old-class
+  def __init__(self, local_name, parent_module_globals, name):
     self._local_name = local_name
     self._parent_module_globals = parent_module_globals
     super(_LazyLoader, self).__init__(name)
@@ -53,6 +53,9 @@ class _LazyLoader(_types.ModuleType):
   def __dir__(self):
     module = self._load()
     return dir(module)
+
+  def __reduce__(self):
+    return __import__, (self.__name__,)
 
 
 # Forwarding a module is as simple as lazy loading the module from the new path
@@ -96,5 +99,33 @@ for _m in _top_level_modules:
 
 # We still need all the names that are toplevel on tensorflow_core
 from tensorflow_core import *
+
+_major_api_version = 2
+
+# These should not be visible in the main tf module.
+try:
+  del core
+except NameError:
+  pass
+
+try:
+  del python
+except NameError:
+  pass
+
+try:
+  del compiler
+except NameError:
+  pass
+
+try:
+  del tools
+except NameError:
+  pass
+
+try:
+  del examples
+except NameError:
+  pass
 
 # LINT.ThenChange(//tensorflow/virtual_root_template_v1.__init__.py.oss)

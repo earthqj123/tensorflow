@@ -20,18 +20,19 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 from tensorflow.python.data.experimental.ops import optimization
+from tensorflow.python.data.kernel_tests import checkpoint_test_base
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.eager import context
+from tensorflow.python.framework import combinations
 from tensorflow.python.framework import errors
-from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 
 
-@test_util.run_all_in_graph_and_eager_modes
 class ChooseFastestDatasetTest(test_base.DatasetTestBase,
                                parameterized.TestCase):
 
+  @combinations.generate(test_base.default_test_combinations())
   def testChooseFastestSimple(self):
     dataset = dataset_ops.Dataset.from_tensor_slices([0, 1, 2, 3, 4])
     merge = optimization._ChooseFastestDataset([dataset, dataset])
@@ -40,6 +41,7 @@ class ChooseFastestDatasetTest(test_base.DatasetTestBase,
         expected_output=[0, 1, 2, 3, 4],
         expected_shapes=dataset_ops.get_legacy_output_shapes(dataset))
 
+  @combinations.generate(test_base.default_test_combinations())
   def testChooseFastestManyInputs(self):
     dataset = dataset_ops.Dataset.from_tensor_slices([0, 1, 2, 3, 4])
     merge = optimization._ChooseFastestDataset([dataset for _ in range(5)])
@@ -48,6 +50,7 @@ class ChooseFastestDatasetTest(test_base.DatasetTestBase,
         expected_output=[0, 1, 2, 3, 4],
         expected_shapes=dataset_ops.get_legacy_output_shapes(dataset))
 
+  @combinations.generate(test_base.default_test_combinations())
   def testChooseFastest(self):
     dataset = dataset_ops.Dataset.range(600)
     f = lambda x: 2 * x
@@ -61,11 +64,25 @@ class ChooseFastestDatasetTest(test_base.DatasetTestBase,
         ],
         expected_shapes=dataset_ops.get_legacy_output_shapes(dataset_a))
 
-  @parameterized.named_parameters(
-      ("Shapes", [0], [[1, 2, 3]], "must have compatible output shapes."),
-      ("Types", [0], [0.0], "must have the same output types."),
-      ("NumComponents", [0], ([0], [1]), "must have the same output types."),
-      ("Cardinality", [1, 2, 3], [1], "must have compatible cardinalities."))
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          combinations.combine(
+              slices_a=[[0]],
+              slices_b=[[[1, 2, 3]]],
+              error_msg="must have compatible output shapes.") +
+          combinations.combine(
+              slices_a=[[0]],
+              slices_b=[[0.0]],
+              error_msg="must have the same output types.") +
+          combinations.combine(
+              slices_a=[[0]],
+              slices_b=[([0], [1])],
+              error_msg="must have the same output types.") +
+          combinations.combine(
+              slices_a=[[1, 2, 3]],
+              slices_b=[[0]],
+              error_msg="must have compatible cardinalities.")))
   def testChooseFastestErrorWithIncompatibleInput(self, slices_a, slices_b,
                                                   error_msg):
     dataset_a = dataset_ops.Dataset.from_tensor_slices(slices_a)
@@ -79,6 +96,25 @@ class ChooseFastestDatasetTest(test_base.DatasetTestBase,
       merge = optimization._ChooseFastestDataset([dataset_a, dataset_b])
       self.assertDatasetProduces(
           merge, expected_error=(errors.InvalidArgumentError, error_msg))
+
+
+class ChooseFastestDatasetCheckpointTest(
+    checkpoint_test_base.CheckpointTestBase, parameterized.TestCase):
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testCore(self):
+    num_outputs = 10
+    batch_size = 2
+
+    def build_ds():
+      dataset = dataset_ops.Dataset.range(num_outputs)
+      map_fn = lambda x: x * 2
+      return optimization._ChooseFastestDataset([  # pylint: disable=protected-access
+          dataset.map(map_fn).batch(batch_size),
+          dataset.batch(batch_size).map(map_fn)
+      ])
+
+    self.run_core_tests(build_ds, num_outputs // 2)
 
 
 if __name__ == "__main__":

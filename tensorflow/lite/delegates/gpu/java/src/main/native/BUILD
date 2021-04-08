@@ -6,7 +6,7 @@ load("//tensorflow/lite:build_def.bzl", "tflite_copts")
 
 package(
     default_visibility = ["//visibility:public"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -25,8 +25,14 @@ cc_library(
         "notap",
     ],
     deps = [
-        "//tensorflow/lite/delegates/gpu:gl_delegate",
+        "//tensorflow/lite/delegates/gpu:delegate",
+        "//tensorflow/lite/delegates/gpu/common:gpu_info",
+        "//tensorflow/lite/delegates/gpu/gl:egl_environment",
+        "//tensorflow/lite/delegates/gpu/gl:request_gpu_info",
+        "//tensorflow/lite/experimental/acceleration/compatibility:android_info",
+        "//tensorflow/lite/experimental/acceleration/compatibility:gpu_compatibility",
         "//tensorflow/lite/java/jni",
+        "@com_google_absl//absl/status",
     ],
     alwayslink = 1,
 )

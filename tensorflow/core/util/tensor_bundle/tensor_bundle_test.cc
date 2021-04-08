@@ -710,11 +710,12 @@ TEST(TensorBundleTest, StringTensorsOldFormat) {
   EXPECT_EQ(AllTensorKeys(&reader),
             std::vector<string>({"floats", "scalar", "string_tensor", "strs"}));
 
-  Expect<string>(&reader, "string_tensor", Tensor(DT_STRING, TensorShape({1})));
-  Expect<string>(&reader, "scalar", test::AsTensor<string>({"hello"}));
-  Expect<string>(
+  Expect<tstring>(&reader, "string_tensor",
+                  Tensor(DT_STRING, TensorShape({1})));
+  Expect<tstring>(&reader, "scalar", test::AsTensor<tstring>({"hello"}));
+  Expect<tstring>(
       &reader, "strs",
-      test::AsTensor<string>({"hello", "", "x01", string(1 << 10, 'c')}));
+      test::AsTensor<tstring>({"hello", "", "x01", string(1 << 10, 'c')}));
   Expect<float>(&reader, "floats", Constant_2x3<float>(16.18));
 }
 
@@ -726,14 +727,15 @@ TEST(TensorBundleTest, StringTensors) {
     BundleWriter writer(Env::Default(), Prefix("foo"));
     TF_EXPECT_OK(writer.Add("string_tensor",
                             Tensor(DT_STRING, TensorShape({1}))));  // Empty.
-    TF_EXPECT_OK(writer.Add("scalar", test::AsTensor<string>({"hello"})));
+    TF_EXPECT_OK(writer.Add("scalar", test::AsTensor<tstring>({"hello"})));
     TF_EXPECT_OK(writer.Add(
         "strs",
-        test::AsTensor<string>({"hello", "", "x01", string(1 << 25, 'c')})));
+        test::AsTensor<tstring>({"hello", "", "x01", string(1 << 25, 'c')})));
 
     // Requires a 64-bit length.
-    string* backing_string = long_string_tensor.flat<string>().data();
-    backing_string->assign(kLongLength, 'd');
+    tstring* backing_string = long_string_tensor.flat<tstring>().data();
+    backing_string->resize_uninitialized(kLongLength);
+    std::char_traits<char>::assign(backing_string->data(), kLongLength, 'd');
     TF_EXPECT_OK(writer.Add("long_scalar", long_string_tensor));
 
     // Mixes in some floats.
@@ -747,12 +749,12 @@ TEST(TensorBundleTest, StringTensors) {
               std::vector<string>({"floats", "long_scalar", "scalar",
                                    "string_tensor", "strs"}));
 
-    Expect<string>(&reader, "string_tensor",
-                   Tensor(DT_STRING, TensorShape({1})));
-    Expect<string>(&reader, "scalar", test::AsTensor<string>({"hello"}));
-    Expect<string>(
+    Expect<tstring>(&reader, "string_tensor",
+                    Tensor(DT_STRING, TensorShape({1})));
+    Expect<tstring>(&reader, "scalar", test::AsTensor<tstring>({"hello"}));
+    Expect<tstring>(
         &reader, "strs",
-        test::AsTensor<string>({"hello", "", "x01", string(1 << 25, 'c')}));
+        test::AsTensor<tstring>({"hello", "", "x01", string(1 << 25, 'c')}));
 
     Expect<float>(&reader, "floats", Constant_2x3<float>(16.18));
 
@@ -766,18 +768,21 @@ TEST(TensorBundleTest, StringTensors) {
     EXPECT_EQ(DT_STRING, dtype);
     EXPECT_EQ(TensorShape({1}), shape);
 
-    // Zero-out the string so that we can be sure the new one is read in.
-    string* backing_string = long_string_tensor.flat<string>().data();
-    backing_string->assign("");
+    // Fill the string differently so that we can be sure the new one is read
+    // in. Because fragmentation in tc-malloc and we have such a big tensor
+    // of 4GB, therefore it is not ideal to free the buffer right now.
+    // The rationale is to make allocation/free close to each other.
+    tstring* backing_string = long_string_tensor.flat<tstring>().data();
+    std::char_traits<char>::assign(backing_string->data(), kLongLength, 'e');
 
     // Read long_scalar and check it contains kLongLength 'd's.
     TF_ASSERT_OK(reader.Lookup("long_scalar", &long_string_tensor));
-    ASSERT_EQ(backing_string, long_string_tensor.flat<string>().data());
+    ASSERT_EQ(backing_string, long_string_tensor.flat<tstring>().data());
     EXPECT_EQ(kLongLength, backing_string->length());
-    for (char c : *backing_string) {
+    for (size_t i = 0; i < kLongLength; i++) {
       // Not using ASSERT_EQ('d', c) because this way is twice as fast due to
       // compiler optimizations.
-      if (c != 'd') {
+      if ((*backing_string)[i] != 'd') {
         FAIL() << "long_scalar is not full of 'd's as expected.";
         break;
       }
@@ -945,7 +950,7 @@ TEST(TensorBundleTest, Checksum) {
     auto WriteStrings = []() {
       BundleWriter writer(Env::Default(), Prefix("strings"));
       TF_EXPECT_OK(
-          writer.Add("foo", test::AsTensor<string>({"hello", "world"})));
+          writer.Add("foo", test::AsTensor<tstring>({"hello", "world"})));
       TF_ASSERT_OK(writer.Finish());
     };
     // Corrupts the first two bytes, which are the varint32-encoded lengths
@@ -1107,10 +1112,10 @@ TEST_F(TensorBundleAlignmentTest, AlignmentTest) {
   }
 }
 
-static void BM_BundleAlignmentByteOff(int iters, int alignment,
-                                      int tensor_size) {
-  testing::StopTiming();
+static void BM_BundleAlignment(::testing::benchmark::State& state) {
   {
+    const int alignment = state.range(0);
+    const int tensor_size = state.range(1);
     BundleWriter::Options opts;
     opts.data_alignment = alignment;
     BundleWriter writer(Env::Default(), Prefix("foo"), opts);
@@ -1120,25 +1125,42 @@ static void BM_BundleAlignmentByteOff(int iters, int alignment,
   }
   BundleReader reader(Env::Default(), Prefix("foo"));
   TF_CHECK_OK(reader.status());
-  testing::StartTiming();
-  for (int i = 0; i < iters; ++i) {
+  for (auto s : state) {
     Tensor t;
     TF_CHECK_OK(reader.Lookup("big", &t));
   }
-  testing::StopTiming();
 }
 
-#define BM_BundleAlignment(ALIGN, SIZE)                        \
-  static void BM_BundleAlignment_##ALIGN##_##SIZE(int iters) { \
-    BM_BundleAlignmentByteOff(iters, ALIGN, SIZE);             \
-  }                                                            \
-  BENCHMARK(BM_BundleAlignment_##ALIGN##_##SIZE)
+BENCHMARK(BM_BundleAlignment)->ArgPair(1, 512);
+BENCHMARK(BM_BundleAlignment)->ArgPair(1, 4096);
+BENCHMARK(BM_BundleAlignment)->ArgPair(1, 1048576);
+BENCHMARK(BM_BundleAlignment)->ArgPair(4096, 512);
+BENCHMARK(BM_BundleAlignment)->ArgPair(4096, 4096);
+BENCHMARK(BM_BundleAlignment)->ArgPair(4096, 1048576);
 
-BM_BundleAlignment(1, 512);
-BM_BundleAlignment(1, 4096);
-BM_BundleAlignment(1, 1048576);
-BM_BundleAlignment(4096, 512);
-BM_BundleAlignment(4096, 4096);
-BM_BundleAlignment(4096, 1048576);
+static void BM_BundleWriterSmallTensor(::testing::benchmark::State& state) {
+  const int64 bytes = state.range(0);
+  Tensor t = Constant(static_cast<int8>('a'), TensorShape{bytes});
+  BundleWriter writer(Env::Default(), Prefix("foo"));
+  int suffix = 0;
+  for (auto s : state) {
+    TF_CHECK_OK(writer.Add(strings::StrCat("small", suffix++), t));
+  }
+}
+
+BENCHMARK(BM_BundleWriterSmallTensor)->Range(1, 1 << 20);
+
+static void BM_BundleWriterLargeTensor(::testing::benchmark::State& state) {
+  const int mb = state.range(0);
+  const int64 bytes = static_cast<int64>(mb) * (1 << 20);
+  Tensor t = Constant(static_cast<int8>('a'), TensorShape{bytes});
+  for (auto s : state) {
+    BundleWriter writer(Env::Default(), Prefix("foo"));
+    TF_CHECK_OK(writer.Add("big", t));
+  }
+}
+
+BENCHMARK(BM_BundleWriterLargeTensor)->Arg(1 << 10);
+BENCHMARK(BM_BundleWriterLargeTensor)->Arg(4 << 10);
 
 }  // namespace tensorflow

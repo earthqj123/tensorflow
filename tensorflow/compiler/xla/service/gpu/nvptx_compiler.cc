@@ -17,105 +17,43 @@ limitations under the License.
 
 #include <stdlib.h>
 
-#include <atomic>
 #include <fstream>
-#include <functional>
-#include <mutex>  // NOLINT(build/c++11): only using std::call_once, not mutex.
-#include <utility>
 
-#include "absl/memory/memory.h"
-#include "absl/strings/numbers.h"
-#include "absl/strings/str_cat.h"
-#include "llvm/IR/DiagnosticInfo.h"
-#include "llvm/IR/DiagnosticPrinter.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Verifier.h"
-#include "tensorflow/compiler/xla/protobuf_util.h"
+#include "absl/base/call_once.h"
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/SourceMgr.h"
 #include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
-#include "tensorflow/compiler/xla/service/batchnorm_expander.h"
-#include "tensorflow/compiler/xla/service/buffer_assignment.h"
-#include "tensorflow/compiler/xla/service/call_inliner.h"
-#include "tensorflow/compiler/xla/service/conditional_simplifier.h"
-#include "tensorflow/compiler/xla/service/convolution_group_converter.h"
-#include "tensorflow/compiler/xla/service/dot_decomposer.h"
 #include "tensorflow/compiler/xla/service/dump.h"
-#include "tensorflow/compiler/xla/service/dynamic_index_splitter.h"
-#include "tensorflow/compiler/xla/service/flatten_call_graph.h"
-#include "tensorflow/compiler/xla/service/gpu/cudnn_batchnorm_rewriter.h"
-#include "tensorflow/compiler/xla/service/gpu/cudnn_conv_algorithm_picker.h"
-#include "tensorflow/compiler/xla/service/gpu/cudnn_conv_pad_for_tensor_cores.h"
-#include "tensorflow/compiler/xla/service/gpu/cudnn_conv_padding_legalization.h"
-#include "tensorflow/compiler/xla/service/gpu/cudnn_conv_rewriter.h"
+#include "tensorflow/compiler/xla/service/gpu/cublas_gemm_pad_for_tensor_cores.h"
 #include "tensorflow/compiler/xla/service/gpu/cudnn_fused_conv_rewriter.h"
+#include "tensorflow/compiler/xla/service/gpu/cudnn_pad_for_convolutions.h"
 #include "tensorflow/compiler/xla/service/gpu/cusolver_rewriter.h"
-#include "tensorflow/compiler/xla/service/gpu/fusion_merger.h"
 #include "tensorflow/compiler/xla/service/gpu/gemm_algorithm_picker.h"
-#include "tensorflow/compiler/xla/service/gpu/gemm_rewriter.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_compiler.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_constants.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_copy_insertion.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_executable.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_hlo_schedule.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_hlo_support_checker.h"
+#include "tensorflow/compiler/xla/service/gpu/gpu_conv_padding_legalization.h"
+#include "tensorflow/compiler/xla/service/gpu/gpu_conv_rewriter.h"
 #include "tensorflow/compiler/xla/service/gpu/gpu_layout_assignment.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_sanitize_constant_names.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_scatter_expander.h"
-#include "tensorflow/compiler/xla/service/gpu/instruction_fusion.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
-#include "tensorflow/compiler/xla/service/gpu/ir_emitter_context.h"
-#include "tensorflow/compiler/xla/service/gpu/ir_emitter_unnested.h"
 #include "tensorflow/compiler/xla/service/gpu/llvm_gpu_backend/gpu_backend_lib.h"
-#include "tensorflow/compiler/xla/service/gpu/multi_output_fusion.h"
-#include "tensorflow/compiler/xla/service/gpu/partition_assignment.h"
-#include "tensorflow/compiler/xla/service/gpu/stream_assignment.h"
 #include "tensorflow/compiler/xla/service/gpu/stream_executor_util.h"
 #include "tensorflow/compiler/xla/service/gpu/target_constants.h"
-#include "tensorflow/compiler/xla/service/gpu/thunk_schedule.h"
-#include "tensorflow/compiler/xla/service/hlo.pb.h"
-#include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_constant_folding.h"
 #include "tensorflow/compiler/xla/service/hlo_cse.h"
-#include "tensorflow/compiler/xla/service/hlo_dataflow_analysis.h"
-#include "tensorflow/compiler/xla/service/hlo_dce.h"
-#include "tensorflow/compiler/xla/service/hlo_element_type_converter.h"
-#include "tensorflow/compiler/xla/service/hlo_get_dimension_size_rewriter.h"
-#include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_fix.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_pipeline.h"
-#include "tensorflow/compiler/xla/service/hlo_proto_util.h"
-#include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
-#include "tensorflow/compiler/xla/service/mem_wasted_on_passthrough_params.h"
-#include "tensorflow/compiler/xla/service/reduce_precision_insertion.h"
-#include "tensorflow/compiler/xla/service/reshape_mover.h"
-#include "tensorflow/compiler/xla/service/rng_expander.h"
-#include "tensorflow/compiler/xla/service/slice_sinker.h"
-#include "tensorflow/compiler/xla/service/sort_simplifier.h"
-#include "tensorflow/compiler/xla/service/stable_sort_expander.h"
-#include "tensorflow/compiler/xla/service/transpose_folding.h"
 #include "tensorflow/compiler/xla/service/tuple_simplifier.h"
-#include "tensorflow/compiler/xla/service/while_loop_constant_sinking.h"
-#include "tensorflow/compiler/xla/service/while_loop_simplifier.h"
-#include "tensorflow/compiler/xla/service/while_loop_trip_count_annotator.h"
-#include "tensorflow/compiler/xla/service/zero_sized_hlo_elimination.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/platform/cuda_libdevice_path.h"
-#include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/regexp.h"
-#include "tensorflow/core/platform/stream_executor_no_cuda.h"
-#include "tensorflow/core/platform/subprocess.h"
 #include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/stream_executor/cuda/cuda_diagnostics.h"
-#include "tensorflow/stream_executor/cuda/ptxas_utils.h"
+#include "tensorflow/stream_executor/gpu/asm_compiler.h"
+#include "tensorflow/stream_executor/gpu/gpu_driver.h"
 
 namespace xla {
 namespace gpu {
@@ -144,7 +82,8 @@ void PrintCantFindCudaMessage(absl::string_view msg,
          "variable XLA_FLAGS=--xla_gpu_cuda_data_dir=/path/to/cuda will work.";
 }
 
-// Returns the directory containing nvvm libdevice files.
+}  // namespace
+
 string GetLibdeviceDir(const HloModuleConfig& hlo_module_config) {
   for (const string& cuda_root : CandidateCudaRoots(hlo_module_config)) {
     string libdevice_dir =
@@ -161,32 +100,56 @@ string GetLibdeviceDir(const HloModuleConfig& hlo_module_config) {
       "uses routines from libdevice.",
       hlo_module_config);
 
-  // GetCudaRootCandidates always inclues ".", but but if everything fails, we
+  // GetCudaRootCandidates always includes ".", but if everything fails, we
   // return it anyway.  Better than returning the empty string.
   return ".";
 }
-
-}  // namespace
 
 Status NVPTXCompiler::OptimizeHloConvolutionCanonicalization(
     HloModule* hlo_module, se::StreamExecutor* stream_exec,
     se::DeviceMemoryAllocator* device_allocator) {
   // Convert convolutions into CustomCalls to cudnn, then canonicalize them
-  // (CudnnConvPaddingLegalization). Also expand cuSolver calls.
+  // (GpuConvPaddingLegalization). Also expand cuSolver calls.
   HloPassPipeline pipeline("conv_canonicalization");
-  pipeline.AddInvariantChecker<HloVerifier>(/*layout_sensitive=*/false,
-                                            /*allow_mixed_precision=*/false);
+  pipeline.AddInvariantCheckerDebug<HloVerifier>(
+      /*layout_sensitive=*/false,
+      /*allow_mixed_precision=*/false);
   pipeline.AddPass<CusolverRewriter>();
-  pipeline.AddPass<CudnnConvRewriter>();
+  pipeline.AddPass<GpuConvRewriter>();
   pipeline.AddPass<CudnnFusedConvRewriter>();
-  pipeline.AddPass<CudnnConvPaddingLegalization>();
-  if (IsVoltaOrLater(*stream_exec)) {
-    pipeline.AddPass<CudnnConvPadForTensorCores>();
-    // CudnnConvPadForTensorCores leaves behind unnecessary
-    // tuple/get-tuple-element pairs that TupleSimplifier fixes.
-    pipeline.AddPass<TupleSimplifier>();
+  pipeline.AddPass<GpuConvPaddingLegalization>();
+  pipeline.AddPass<CudnnPadForConvolutions>(IsVoltaOrLater(*stream_exec));
+  // CudnnConvPadForIntegerConvolutions and CudnnConvPadForTensorCores leaves
+  // behind unnecessary tuple/get-tuple-element pairs that TupleSimplifier
+  // fixes.
+  pipeline.AddPass<TupleSimplifier>();
+
+  // tf2xla bridge, DepthwiseConvolutionConverter and GpuConvRewriter
+  // introduces reshapes and transposes that can be eliminated using
+  // AlgebraicSimplifier
+  {
+    auto& pass = pipeline.AddPass<HloPassFix<HloPassPipeline>>(
+        "algebraic_simplification_post_conv_rewriter");
+    pass.AddInvariantCheckerDebug<HloVerifier>(/*layout_sensitive=*/false,
+                                               /*allow_mixed_precision=*/false);
+
+    AlgebraicSimplifierOptions options;
+    // When transposes appear in a fusion node, we can easily adjust the
+    // multi-dimensional index to create the one needed for the operand. This
+    // is not as easy with bitcasts, because we don't have the information
+    // readily available which dimensions are permuted. In addition to that,
+    // if we have a transpose and a reshape next to each other, they will both
+    // be replaced by a bitcast, and we replace bitcast(bitcast) with one
+    // bitcast. This leads to having to linearize and then delinearize the
+    // index.
+    options.set_replace_transpose_with_bitcast(false);
+    options.set_enable_conv_operand_swap(false);
+    options.set_cudnn_batchnorm_forward_training_metadata(
+        kCudnnBatchNormForwardTrainingCallTarget);
+    pass.AddPass<AlgebraicSimplifier>(options);
   }
-  // CudnnConvRewriter, CudnnConvPaddingLegalization and
+
+  // GpuConvRewriter, GpuConvPaddingLegalization and
   // CudnnConvPadForTensorCores may add instructions which can be simplified
   // by constant folding.
   pipeline.AddPass<HloConstantFolding>();
@@ -198,58 +161,23 @@ Status NVPTXCompiler::OptimizeHloConvolutionCanonicalization(
 Status NVPTXCompiler::OptimizeHloPostLayoutAssignment(
     HloModule* hlo_module, se::StreamExecutor* stream_exec,
     se::DeviceMemoryAllocator* device_allocator) {
-  HloPassPipeline pipeline("post-layout_assignment");
-  /* TODO(b/117531509): Use LayoutAssignment::InstructionCanChangeLayout after
-   * fixing the ticket. */
-  pipeline.AddInvariantChecker<HloVerifier>(
-      /*layout_sensitive=*/true,
-      /*allow_mixed_precision=*/false,
-      LayoutAssignment::InstructionCanChangeLayout);
+  HloPassPipeline pre_pipeline("nvptx post-layout_assignment part 1");
+  // Pad the dimensions of matrices in dot operations to multiples of 8.
+  // This needs to run before GemmRewriter, which is part of
+  // OptimizeHloPostLayoutAssignment().
+  if (IsVoltaOrLater(*stream_exec)) {
+    pre_pipeline.AddPass<CublasGemmPadForTensorCores>();
+  }
+  TF_RETURN_IF_ERROR(pre_pipeline.Run(hlo_module).status());
 
-  // The LayoutAssignment pass may leave behind kCopy instructions which are
-  // duplicate or NOPs, so remove them with algebraic simplification and CSE.
-  AlgebraicSimplifierOptions options;
-  options.set_is_layout_sensitive(true);
-  pipeline.AddPass<HloPassFix<AlgebraicSimplifier>>(options);
+  TF_RETURN_IF_ERROR(GpuCompiler::OptimizeHloPostLayoutAssignment(
+      hlo_module, stream_exec, device_allocator));
 
-  // Rewrite GEMMs into custom calls.
-  pipeline.AddPass<GemmRewriter>();
-
-  // Choose the fastest algorithm for each conv.
-  //
-  // We pick the algorithm before fusion so we can generate better HLO. After
-  // CudnnConvRewriter, our convolutions are CustomCalls which return a
-  // tuple (conv_result, scratch_memory), and the each conv uses 0 bytes of
-  // scratch:
-  //
-  //   customcall = (f32[...], f32[0])
-  //   return gte(customcall, 0)
-  //
-  // The algorithm picker then chooses the best algorithm, and potentially
-  // increases the scratch space.  It replaces customcall with new_tuple,
-  // giving us the following:
-  //
-  //   new_customcall = (f32[...], f32[N])
-  //   new_tuple = tuple(gte(new_customcall, 0), constant f32[0])
-  //   return gte(new_tuple, 0)
-  //
-  // The new tuple and gte instructions then be simplified away, because
-  // nobody is expected to use the scratch value.
-  //
-  // However, if we were to run CudnnConvAlgorithmPicker after fusion
-  // the gte(customcall, 0) would probably already be into a fusion node.  We
-  // can't simplify across HloComputation boundaries, so in this case we
-  // wouldn't be able to simplify away the new_tuple bits.
-  pipeline.AddPass<CudnnConvAlgorithmPicker>(stream_exec, device_allocator);
+  HloPassPipeline post_pipeline("nvptx post-layout_assignment part 2");
 
   // Find the fastest algorithm for GEMMs.
-  pipeline.AddPass<GemmAlgorithmPicker>(stream_exec, device_allocator);
-
-  // Clean up new_tuple described above.
-  pipeline.AddPass<TupleSimplifier>();
-
-  pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/true);
-  TF_RETURN_IF_ERROR(pipeline.Run(hlo_module).status());
+  post_pipeline.AddPass<GemmAlgorithmPicker>(stream_exec, device_allocator);
+  TF_RETURN_IF_ERROR(post_pipeline.Run(hlo_module).status());
 
   return Status::OK();
 }
@@ -272,6 +200,87 @@ absl::optional<bool> CanShareBufferHint(const HloInstruction* user,
   return absl::nullopt;
 }
 
+// Try to load ptx from files defined in the FLAGS. If successful, return true.
+bool MaybeLoadPtxFromFile(const HloModuleConfig module_config,
+                          const HloModule* module, std::string* ptx) {
+  // If the xla_gpu_ptx_file option is set, be explicit if a file is used
+  // and warn when a file is not used to ease catching typo in filename.
+  std::string prefix = xla::FilenameFor(*module, "", *ptx);
+  std::string matched_filename;
+  for (const string& full_filename :
+       module_config.debug_options().xla_gpu_ptx_file()) {
+    // To ease comparing many PTX versions, accept different suffixes then
+    // the original filename.
+    auto filename = tensorflow::io::Basename(full_filename);
+    if (absl::StartsWith(filename, prefix)) {
+      matched_filename = full_filename;
+      VLOG(0) << "RunBackend() - Will load PTX from file: " << full_filename;
+      break;
+    }
+  }
+  if (!module_config.debug_options().xla_gpu_ptx_file().empty() &&
+      matched_filename.empty()) {
+    VLOG(0) << "RunBackend() - For module with prefix '" << prefix
+            << "', we did not found a PTX file to load.";
+  }
+
+  if (!matched_filename.empty()) {
+    std::ifstream ifs(matched_filename, std::ifstream::in);
+    *ptx = std::string(std::istreambuf_iterator<char>(ifs),
+                       std::istreambuf_iterator<char>());
+    CHECK(!ptx->empty()) << "Empty or non existing PTX file: "
+                         << matched_filename;
+    return true;
+  }
+  return false;
+}
+
+// Try to load textual LLVM IR from files defined in the FLAGS. If
+// successful, return the llvm::Module, otherwise return nullptr.
+std::unique_ptr<llvm::Module> MaybeLoadLLVMFromFile(const HloModule* module,
+                                                    llvm::Module* llvm_module) {
+  // If the xla_gpu_llvm_ir_file option is set, be explicit if a file is used
+  // and warn when a file is not used to ease catching typo in filename.
+  if (module == nullptr) {
+    return nullptr;
+  }
+
+  std::string prefix = xla::FilenameFor(*module, "", "");
+  auto xla_gpu_llvm_ir_file =
+      module->config().debug_options().xla_gpu_llvm_ir_file();
+  auto matched_filename = absl::c_find_if(
+      xla_gpu_llvm_ir_file, [prefix](const string& full_filename) {
+        // To ease comparing many LLVM versions, accept different suffixes then
+        // the original filename.
+        return absl::StartsWith(tensorflow::io::Basename(full_filename),
+                                prefix);
+      });
+  if (!xla_gpu_llvm_ir_file.empty() &&
+      matched_filename == std::end(xla_gpu_llvm_ir_file)) {
+    VLOG(0) << "RunBackend() - For module with prefix '" << prefix
+            << "', we did not found a LLVM file to load.";
+  }
+
+  if (matched_filename != std::end(xla_gpu_llvm_ir_file)) {
+    VLOG(0) << "RunBackend() - Will load LLVM from file: " << *matched_filename;
+    llvm::LLVMContext& context = llvm_module->getContext();
+    llvm::SMDiagnostic err;
+    std::unique_ptr<llvm::Module> loaded_module =
+        llvm::parseIRFile(*matched_filename, err, context);
+
+    if (!loaded_module) {
+      err.print("ERR", llvm::errs());
+      LOG(FATAL) << "Failed to load an LLVM file. It is probably invalid LLVM.";
+    }
+    // Overwrite the dumped not optimized LLVM to show which one will be used.
+    llvm_ir::DumpIrIfEnabled(*module, *loaded_module, /*optimized=*/false);
+    return loaded_module;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 // Prints a warning if the ptx->sass JIT in the driver has known bugs.
 //
 // Using such a driver only a problem if we fail to use ptxas to compile our ptx
@@ -280,8 +289,8 @@ absl::optional<bool> CanShareBufferHint(const HloInstruction* user,
 //
 // Only prints a warning the first time it's called.
 void WarnIfBadDriverJITVersion() {
-  static std::once_flag run_once;
-  std::call_once(run_once, [] {
+  static absl::once_flag run_once;
+  absl::call_once(run_once, [] {
     auto version_or_status = se::cuda::Diagnostician::FindKernelDriverVersion();
     if (!version_or_status.ok()) {
       LOG(WARNING) << "Couldn't read CUDA driver version.";
@@ -312,41 +321,6 @@ void WarnIfBadDriverJITVersion() {
   });
 }
 
-// Try to load ptx from files defined in the FLAGS. If successful, return true.
-bool MaybeLoadPtxFromFile(const HloModule* module, std::string* ptx) {
-  // If the xla_gpu_ptx_file options is set, be explicit when a file is used
-  // and warn when a file is not used to ease catching typo in filename.
-  std::string prefix = xla::FilenameFor(*module, *ptx);
-  std::string matched_filename;
-  for (const string filename :
-       module->config().debug_options().xla_gpu_ptx_file()) {
-    // To ease comparing many PTX versions, accept different suffixes then
-    // the original filename.
-    if (absl::StartsWith(filename, prefix)) {
-      matched_filename = filename;
-      VLOG(0) << "RunBackend() - Will load PTX from file: " << filename;
-      break;
-    }
-  }
-  if (module->config().debug_options().xla_gpu_ptx_file().size() > 0 &&
-      matched_filename.empty()) {
-    VLOG(0) << "RunBackend() - For module with prefix '" << prefix
-            << "', we did not found a PTX file to load.";
-  }
-
-  if (!matched_filename.empty()) {
-    std::ifstream ifs(matched_filename, std::ifstream::in);
-    *ptx = std::string(std::istreambuf_iterator<char>(ifs),
-                       std::istreambuf_iterator<char>());
-    CHECK(!ptx->empty()) << "Empty or non existing PTX file: "
-                         << matched_filename;
-    return true;
-  }
-  return false;
-}
-
-}  // namespace
-
 NVPTXCompiler::NVPTXCompiler()
     : GpuCompiler(stream_executor::cuda::kCudaPlatformId, nvptx::kTargetTriple,
                   nvptx::kDataLayout) {}
@@ -369,10 +343,12 @@ GpuVersion NVPTXCompiler::GetGpuVersion(se::StreamExecutor* stream_exec) {
 }
 
 StatusOr<std::pair<std::string, std::vector<uint8>>>
-NVPTXCompiler::CompileTargetBinary(const HloModule* module,
+NVPTXCompiler::CompileTargetBinary(const HloModuleConfig& module_config,
                                    llvm::Module* llvm_module,
                                    GpuVersion gpu_version,
-                                   se::StreamExecutor* stream_exec) {
+                                   se::StreamExecutor* stream_exec,
+                                   bool relocatable,
+                                   const HloModule* debug_module) {
   std::pair<int, int> compute_capability =
       absl::get<std::pair<int, int>>(gpu_version);
 
@@ -384,43 +360,41 @@ NVPTXCompiler::CompileTargetBinary(const HloModule* module,
     // time, we have a one-element cache, keyed on the module's config's
     // cuda_data_dir.
     if (cached_libdevice_dir_.empty()) {
-      cached_libdevice_dir_ = GetLibdeviceDir(module->config());
+      cached_libdevice_dir_ = GetLibdeviceDir(module_config);
     }
     libdevice_dir = cached_libdevice_dir_;
   }
   VLOG(2) << "Libdevice dir = " << libdevice_dir << "\n";
+  std::unique_ptr<llvm::Module> loaded_module =
+      MaybeLoadLLVMFromFile(debug_module, llvm_module);
+  llvm::Module* selected_module = nullptr;
+  if (loaded_module) {
+    selected_module = loaded_module.get();
+  } else {
+    selected_module = llvm_module;
+  }
 
   string ptx;
-  if (!MaybeLoadPtxFromFile(module, &ptx)) {
+  if (!(debug_module &&
+        MaybeLoadPtxFromFile(module_config, debug_module, &ptx))) {
     XLA_SCOPED_LOGGING_TIMER(
         "NVPTXCompiler::CompileTargetBinary - CompileToPtx");
-    TF_ASSIGN_OR_RETURN(
-        ptx, nvptx::CompileToPtx(llvm_module, gpu_version, module->config(),
-                                 libdevice_dir));
+    TF_ASSIGN_OR_RETURN(ptx, nvptx::CompileToPtx(selected_module, gpu_version,
+                                                 module_config, libdevice_dir));
   }
 
-  llvm_ir::DumpIrIfEnabled(*module, *llvm_module, /*optimized=*/true);
-
-  if (user_post_optimization_hook_) {
-    user_post_optimization_hook_(*llvm_module);
-  }
-  // Write PTX to IR dump directory, if IR dumping was requested.
-  if (DumpingEnabledForHloModule(*module)) {
-    DumpToFileInDirOrStdout(*module, "ptx", ptx);
-  }
-
-  std::vector<uint8> cubin =
-      CompilePtxOrGetCachedResult(stream_exec, ptx, compute_capability.first,
-                                  compute_capability.second, module->config());
+  std::vector<uint8> cubin = CompileGpuAsmOrGetCachedResult(
+      stream_exec, ptx, compute_capability.first, compute_capability.second,
+      module_config, relocatable);
 
   return std::pair<std::string, std::vector<uint8>>(std::move(ptx),
                                                     std::move(cubin));
 }
 
-std::vector<uint8> NVPTXCompiler::CompilePtxOrGetCachedResult(
+std::vector<uint8> NVPTXCompiler::CompileGpuAsmOrGetCachedResult(
     se::StreamExecutor* stream_exec, const string& ptx, int cc_major,
-    int cc_minor, const HloModuleConfig& hlo_module_config) {
-  XLA_SCOPED_LOGGING_TIMER("NVPTXCompiler::CompilePtxOrGetCachedResult");
+    int cc_minor, const HloModuleConfig& hlo_module_config, bool relocatable) {
+  XLA_SCOPED_LOGGING_TIMER("NVPTXCompiler::CompileGpuAsmOrGetCachedResult");
   tensorflow::profiler::TraceMe activity(
       "PTX->CUBIN", tensorflow::profiler::TraceMeLevel::kInfo);
   bool inserted;
@@ -434,7 +408,7 @@ std::vector<uint8> NVPTXCompiler::CompilePtxOrGetCachedResult(
     tensorflow::mutex_lock lock(mutex_);
     std::tie(iter, inserted) = compilation_cache_.emplace(
         std::piecewise_construct,
-        std::forward_as_tuple(ptx, cc_major, cc_minor),
+        std::forward_as_tuple(ptx, cc_major, cc_minor, relocatable),
         std::forward_as_tuple());
     cache_ptx = &iter->first.ptx;
     cache_value = &iter->second;
@@ -448,17 +422,33 @@ std::vector<uint8> NVPTXCompiler::CompilePtxOrGetCachedResult(
     if (inserted) {
       CHECK(!cache_value->compilation_done);
       if (!ptx.empty()) {
-        StatusOr<std::vector<uint8>> maybe_cubin = se::cuda::CompilePtx(
-            stream_exec->device_ordinal(), cache_ptx->c_str(),
-            PtxOptsFromConfig(hlo_module_config));
+        auto ptxas_config = PtxOptsFromConfig(hlo_module_config);
+        if (relocatable) {
+          ptxas_config.extra_flags.push_back("-c");
+        }
+        StatusOr<std::vector<uint8>> maybe_cubin = se::CompileGpuAsm(
+            stream_exec->device_ordinal(), cache_ptx->c_str(), ptxas_config);
+
         if (maybe_cubin.ok()) {
           cache_value->cubin_data = std::move(maybe_cubin).ValueOrDie();
           VLOG(2) << "Compiled PTX size:" << ptx.size()
                   << " CUBIN size: " << cache_value->cubin_data.size();
         } else {
-          bool log_warning = true;
           if (maybe_cubin.status().code() ==
               tensorflow::error::Code::NOT_FOUND) {
+            if (!hlo_module_config.debug_options()
+                     .xla_gpu_unsafe_fallback_to_driver_on_ptxas_not_found()) {
+              PrintCantFindCudaMessage(
+                  "Can't find ptxas binary in ${CUDA_DIR}/bin.  Custom ptxas "
+                  "location can be specified using $PATH.",
+                  hlo_module_config);
+              LOG(FATAL)
+                  << "Can't find ptxas binary.  You can pass the flag "
+                     "--xla_gpu_unsafe_fallback_to_driver_on_ptxas_not_found "
+                     "to use the GPU driver for compiling ptx instead. However "
+                     "this option is discouraged and can lead to increased "
+                     "memory consumptions and other subtle runtime issues.";
+            }
             // Missing ptxas is expected in some environments where CUDA SDK
             // binaries are not available. We don't want to spam logs with
             // identical warnings in this case.
@@ -466,15 +456,25 @@ std::vector<uint8> NVPTXCompiler::CompilePtxOrGetCachedResult(
             // TODO(jlebar): we should implement a LOG_FIRST_N and LOG_EVERY_N
             // for more general usage.
             static std::atomic<bool> warning_done(false);
-            log_warning = !warning_done.exchange(true);
-          }
-          if (log_warning) {
-            PrintCantFindCudaMessage(
-                "Can't find ptxas binary in ${CUDA_DIR}/bin.  Will back to the "
-                "GPU driver for PTX -> sass compilation.  This is OK so long "
-                "as you don't see a warning below about an out-of-date driver "
-                "version.",
-                hlo_module_config);
+            bool log_warning = !warning_done.exchange(true);
+            if (log_warning) {
+              PrintCantFindCudaMessage(
+                  "Can't find ptxas binary in ${CUDA_DIR}/bin.  Will back to "
+                  "the GPU driver for PTX -> sass compilation.  This is OK so "
+                  "long as you don't see a warning below about an out-of-date "
+                  "driver version. Custom ptxas location can be specified "
+                  "using $PATH.",
+                  hlo_module_config);
+            }
+          } else if (maybe_cubin.status().code() !=
+                     tensorflow::error::Code::UNIMPLEMENTED) {
+            // If unimplemented is returned, we fallback to the driver.
+            LOG(FATAL) << "ptxas returned an error during compilation of ptx "
+                          "to sass: '"
+                       << maybe_cubin.status() << "'  "
+                       << "If the error message indicates that a file could "
+                          "not be written, please verify that sufficient "
+                          "filesystem space is provided.";
           }
 
           // We're going to use the driver to JIT our PTX->SASS, so warn if
@@ -494,6 +494,18 @@ std::vector<uint8> NVPTXCompiler::CompilePtxOrGetCachedResult(
   CHECK(cache_value != nullptr);
   CHECK(cache_value->compilation_done);
   return cache_value->cubin_data;
+}
+
+StatusOr<std::vector<uint8>> NVPTXCompiler::LinkModules(
+    se::StreamExecutor* stream_exec, std::vector<std::vector<uint8>> modules) {
+  std::vector<stream_executor::CubinOrPTXImage> images;
+  images.reserve(modules.size());
+  for (auto& module : modules) {
+    images.push_back({"", std::move(module)});
+  }
+  return LinkGpuAsm(static_cast<se::gpu::GpuContext*>(
+                        stream_exec->implementation()->GpuContextHack()),
+                    images);
 }
 
 }  // namespace gpu

@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
 import re
 
 from absl.testing import parameterized
@@ -25,7 +26,9 @@ import numpy as np
 
 from tensorflow.python.distribute import values as dist_values
 from tensorflow.python.distribute.mirrored_strategy import MirroredStrategy
+from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
+from tensorflow.python.framework import config
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
@@ -41,6 +44,7 @@ from tensorflow.python.ops import stateful_random_ops as \
 random
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
+from tensorflow.python.training.tracking import util as tracking_util
 
 
 g_seeded = None
@@ -54,6 +58,15 @@ INTS = [dtypes.int32, dtypes.int64]
 
 
 class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
+
+  def setUp(self):
+    super(StatefulRandomOpsTest, self).setUp()
+    physical_devices = config.list_physical_devices("CPU")
+    config.set_logical_device_configuration(
+        physical_devices[0], [
+            context.LogicalDeviceConfiguration(),
+            context.LogicalDeviceConfiguration()
+        ])
 
   def testCreateRNGStateIntSeed(self):
     """Tests `create_rng_state` when `seed` is int."""
@@ -133,6 +146,17 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
       self.assertRegex("GPU", gens[0].state.device)
 
   @test_util.run_v2_only
+  def testSplitInFunction(self):
+    g = random.Generator.from_seed(1)
+    new_g = [None]  # using list as mutable cells
+    @def_function.function
+    def f():
+      if new_g[0] is None:  # avoid creating variable in 2nd trace
+        new_g[0] = g.split(2)
+      return [new_g[0][i].normal([]) for i in range(2)]
+    f()
+
+  @test_util.run_v2_only
   def testReset(self):
     shape = [2, 3]
     gen = random.Generator.from_seed(0)
@@ -186,6 +210,49 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
       check_results(expected_normal2, f(constructor))
 
   @test_util.run_v2_only
+  def testCreateGeneratorFromSymbolic(self):
+    g = [None, None, None]  # using list as mutable cells
+    @def_function.function
+    def f(scalar, vector2, vector3):
+      if g[0] is None:  # avoid creating variable in 2nd trace
+        g[0] = random.Generator.from_seed(scalar)
+        g[0].reset_from_seed(scalar)  # also test reset
+        g[1] = random.Generator.from_state(vector3, random.RNG_ALG_PHILOX)
+        g[1].reset(vector3)
+        g[2] = random.Generator.from_key_counter(
+            scalar, vector2, random.RNG_ALG_PHILOX)
+        g[2].reset_from_key_counter(scalar, vector2)
+      return [g[i].normal([]) for i in range(3)]
+    args = (1, [2, 2], [3, 3, 3])
+    args = [constant_op.constant(v) for v in args]
+    f(*args)
+
+  @parameterized.parameters([
+      ("philox", random.RNG_ALG_PHILOX, random.Algorithm.PHILOX),
+      ("threefry", random.RNG_ALG_THREEFRY, random.Algorithm.THREEFRY)])
+  @test_util.run_v2_only
+  def testAlg(self, name, int_id, enum_id):
+    g_by_name = random.Generator.from_seed(1234, name)
+    g_by_int = random.Generator.from_seed(1234, int_id)
+    g_by_enum = random.Generator.from_seed(1234, enum_id)
+    self.assertEqual(g_by_name.algorithm, g_by_int.algorithm)
+    self.assertEqual(g_by_name.algorithm, g_by_enum.algorithm)
+
+  @test_util.run_v2_only
+  def testGeneratorCreationWithVar(self):
+    """Tests creating generator with a variable.
+    """
+    alg = random.RNG_ALG_PHILOX
+    state = [1, 2, 3]
+    var = variables.Variable(state, dtype=random.STATE_TYPE)
+    g = random.Generator(state=state, alg=alg)
+    g_var = random.Generator(state=var, alg=alg)
+    shape = [2, 3]
+    g.normal(shape)
+    g_var.normal(shape)
+    self.assertAllEqual(g.state.read_value(), var.read_value())
+
+  @test_util.run_v2_only
   def testGeneratorCreationUnseeded(self):
     """Tests generator creation, the unseeded case."""
     shape = [2, 3]
@@ -236,7 +303,7 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
     with self.cached_session() as sess:
       gen1 = random.Generator.from_seed(seed)
       gen2 = random.Generator.from_non_deterministic_state()
-      sess.run((gen1._state_var.initializer, gen2._state_var.initializer))
+      sess.run((gen1.state.initializer, gen2.state.initializer))
       r1 = gen1.normal(shape, dtype=dtypes.float32)
       r2 = gen2.normal(shape, dtype=dtypes.float32)
       def f():
@@ -334,7 +401,7 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
     gen = random.Generator(state=[counter, 0, key], alg=random.RNG_ALG_PHILOX)
     delta = 432
     gen.skip(delta)
-    new_counter = gen._state_var[0]
+    new_counter = gen.state[0]
     self.assertAllEqual(counter + delta * 256, new_counter)
 
   def _sameAsOldRandomOps(self, device, floats):
@@ -356,7 +423,7 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
         with ops.device(device):
           return new(dtype, gen)
 
-      for _ in range(100):
+      for _ in range(5):
         self.assertAllEqual(run_old(), run_new())
 
     shape = constant_op.constant([4, 7])
@@ -523,6 +590,48 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
         "For the Philox algorithm, the size of state must be at least"):
       gen_stateful_random_ops.stateful_standard_normal_v2(
           var.handle, random.RNG_ALG_PHILOX, shape)
+    with self.assertRaisesWithPredicateMatch(
+        ValueError,
+        "minval must be a scalar; got a tensor of shape "):
+      @def_function.function
+      def f():
+        gen.uniform(shape=shape, minval=array_ops.zeros(shape, "int32"),
+                    maxval=100, dtype="int32")
+      f()
+    with self.assertRaisesWithPredicateMatch(
+        ValueError,
+        "maxval must be a scalar; got a tensor of shape "):
+      @def_function.function
+      def f2():
+        gen.uniform(
+            shape=shape, minval=0, maxval=array_ops.ones(shape, "int32") * 100,
+            dtype="int32")
+      f2()
+
+  @test_util.run_v2_only
+  def testGetGlobalGeneratorWithXla(self):
+    """Demonstrates using the global generator with XLA."""
+    # This test was passing before because soft placement silently picked the
+    # CPU kernel.
+    # TODO(wangpeng): Remove this skip
+    self.skipTest("NonDeterministicInts lacks XLA kernel.")
+
+    if not config.list_physical_devices("XLA_CPU"):
+      self.skipTest("No XLA_CPU device available.")
+
+    random.set_global_generator(None)
+
+    @def_function.function(jit_compile=True)
+    def make_seed():
+      generator = random.get_global_generator()
+      state = array_ops.identity(generator.state, name="state")
+      return generator.uniform_full_int((2,), dtypes.int32, name="seed"), state
+
+    with ops.device("/device:XLA_CPU:0"):
+      seed, state = make_seed()
+      self.assertTrue(np.all(np.isfinite(seed.numpy())))
+      random.get_global_generator().reset(state)
+      self.assertAllEqual(make_seed()[0], seed)
 
   @test_util.run_v2_only
   def testSetGlobalGeneratorBadWithDefun(self):
@@ -542,17 +651,31 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
       _ = f()
 
   @test_util.run_v2_only
-  @test_util.run_cuda_only
-  def testMirroredStratSeq(self):
+  def testFunctionArg(self):
+    """Tests that RNG can be used as tf.function's argument.
+    """
+    shape = [2, 3]
+    @def_function.function
+    def f(gen):
+      return gen.normal(shape)
+    g1 = random.Generator.from_seed(1)
+    g2 = random.Generator.from_seed(1)
+    res1 = f(g1)
+    res2 = g2.normal(shape)
+    self.assertAllEqual(res1, res2)
+    self.assertAllEqual(g1.state.read_value(), g2.state.read_value())
+
+  @test_util.run_v2_only
+  def testCreateOutsideMirroredStrat(self):
     """Tests RNG/MirrorStrategy interaction #1.
 
-    If an RNG is created outside strategy.scope(), all replicas will access the
+    If an RNG is created outside a DS scope, all replicas will access the
     same RNG object, and accesses are serialized.
     """
     shape = [3, 4]
     dtype = dtypes.int32
     gen = random.Generator.from_seed(1234)
-    strat = MirroredStrategy(devices=["/cpu:0", test_util.gpu_device_name()])
+    strat = MirroredStrategy(devices=["cpu:0", "cpu:1"])
     with strat.scope():
       def f():
         t1 = gen.uniform_full_int(shape=shape, dtype=dtype)
@@ -566,89 +689,8 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
       self.assertAllDifferent(values)
 
   @test_util.run_v2_only
-  @test_util.run_cuda_only
-  def testMirroredStratParaSync(self):
-    """Tests RNG/MirrorStrategy interaction #2.
-
-    If an RNG is created inside strategy.scope(), each replica gets an
-    mirror of this RNG. If they access their RNGs in the same
-    manner, their random-number streams are the same.
-    """
-    shape = [3, 4]
-    dtype = dtypes.int32
-    strat = MirroredStrategy(devices=["/cpu:0", test_util.gpu_device_name()])
-    with strat.scope():
-      gen = random.Generator.from_seed(1234)
-      def f():
-        t1 = gen.uniform_full_int(shape=shape, dtype=dtype)
-        t2 = gen.uniform_full_int(shape=shape, dtype=dtype)
-        t = array_ops.stack([t1, t2])
-        return t
-      results = strat.extended.call_for_each_replica(fn=f)
-      values = results.values
-      self.assertAllEqual(2, len(values))
-      self.assertAllEqual(values[0], values[1])
-
-  @test_util.run_v2_only
-  @test_util.run_cuda_only
-  def testMirroredStratParaSyncWithinFun(self):
-    """Tests RNG/MirrorStrategy interaction #2b.
-
-    If the RNG creation is within `f` in situation #2, the replicas'
-    random-number streams are still the same. Note that whether the RNG creation
-    is within strategy.scope() or not doesn't affect the result in this case
-    (putting in inside strategy.scope() will cause unnecessary mirror creation
-    and waste memory though).
-    """
-    shape = [3, 4]
-    dtype = dtypes.int32
-    strat = MirroredStrategy(devices=["/cpu:0", test_util.gpu_device_name()])
-    def f():
-      gen = random.Generator.from_seed(1234)
-      t1 = gen.uniform_full_int(shape=shape, dtype=dtype)
-      t2 = gen.uniform_full_int(shape=shape, dtype=dtype)
-      t = array_ops.stack([t1, t2])
-      return t
-    results = strat.extended.call_for_each_replica(fn=f)
-    values = results.values
-    self.assertAllEqual(2, len(values))
-    self.assertAllEqual(values[0], values[1])
-
-  @test_util.run_v2_only
-  @test_util.run_cuda_only
-  def testMirroredStratUnseedSync(self):
-    """Tests RNG/MirrorStrategy interaction #2c.
-
-    If the RNG created in situation #2 is unseeded, the replicas' random-number
-    streams are still the same.
-
-    If the RNG created in situation #2b is unseeded, the replicas' random-number
-    streams will be different. We can't test this for now because the op
-    'NonDeterministicInts' is not implemented on GPU yet.
-    """
-    shape = [3, 4]
-    dtype = dtypes.int32
-    strat = MirroredStrategy(devices=["/cpu:0", test_util.gpu_device_name()])
-    # TODO(wangpeng): support calling `random.Generator()` inside `f` (i.e.
-    #   inside `call_for_each_replica` so that each replica can get a
-    #   different random-number stream. The only obstacle is that op
-    #   'NonDeterministicInts' is not implemented on GPU.)
-    with strat.scope():
-      gen = random.Generator.from_non_deterministic_state()
-      def f():
-        t1 = gen.uniform_full_int(shape=shape, dtype=dtype)
-        t2 = gen.uniform_full_int(shape=shape, dtype=dtype)
-        t = array_ops.stack([t1, t2])
-        return t
-      results = strat.extended.call_for_each_replica(fn=f)
-      values = results.values
-      self.assertAllEqual(2, len(values))
-      self.assertAllEqual(values[0], values[1])
-
-  @test_util.run_v2_only
-  @test_util.run_cuda_only
   def testMirroredStratParaAsync(self):
-    """Tests RNG/MirrorStrategy interaction #3.
+    """Tests RNG/MirrorStrategy interaction #2.
 
     The user can create n independent RNGs outside strategy.scope(), where n
     is the number of replicas, and give one to each replica. The replicas can
@@ -657,12 +699,10 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
     shape = [3, 4]
     dtype = dtypes.int32
     gens = random.get_global_generator().split(count=2)
-    devices = ["/cpu:0", test_util.gpu_device_name()]
+    devices = ["cpu:0", "cpu:1"]
     strat = MirroredStrategy(devices=devices)
     # Use `PerReplica` to specify which `gen` is sent to which replica
-    gens = dist_values.PerReplica(
-        device_map=dist_values.ReplicaDeviceMap(devices),
-        values=[[g] for g in gens])
+    gens = dist_values.PerReplica([[g] for g in gens])
     with strat.scope():
       def f(gen):
         t1 = gen.uniform_full_int(shape=shape, dtype=dtype)
@@ -671,10 +711,40 @@ class StatefulRandomOpsTest(test.TestCase, parameterized.TestCase):
         return t
       results = strat.extended.call_for_each_replica(
           fn=f, args=gens)
-      values = results.values
-      self.assertAllEqual(2, len(values))
-      self.assertAllDifferent(values)
+      local_results = strat.experimental_local_results(results)
+      self.assertAllEqual(2, len(local_results))
+      self.assertAllDifferent(local_results)
+
+  @test_util.run_v2_only
+  def testUniformFullInt(self):
+    """Tests full-range int uniform.
+    """
+    shape = [3, 4]
+    dtype = dtypes.int32
+    g = random.Generator.from_seed(1)
+    r1 = g.uniform(shape=shape, dtype=dtype, minval=None)
+    g = random.Generator.from_seed(1)
+    r2 = g.uniform_full_int(shape=shape, dtype=dtype)
+    self.assertAllEqual(r1, r2)
+
+  @test_util.run_v2_only
+  def testRestore(self):
+    """Tests save and restore.
+    """
+    fname = os.path.join(self.get_temp_dir(), "checkpoint")
+    g = random.Generator.from_seed(1)
+    cp = tracking_util.Checkpoint(g=g)
+    def write_restore_compare():
+      cp.write(fname)
+      r1 = g.uniform([], dtype=dtypes.uint32, minval=None)
+      cp.restore(fname)
+      r2 = g.uniform([], dtype=dtypes.uint32, minval=None)
+      self.assertAllEqual(r1, r2)
+    # Run multiple times so that cp.write is called in various RNG states
+    for _ in range(2):
+      write_restore_compare()
 
 
 if __name__ == "__main__":
+  config.set_soft_device_placement(False)
   test.main()

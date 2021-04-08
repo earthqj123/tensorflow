@@ -18,10 +18,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from collections import abc
 import time
+
 import six
 
-from tensorflow.python import pywrap_tensorflow
 from tensorflow.python.distribute import distribution_strategy_context
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import io_ops
@@ -31,6 +32,7 @@ from tensorflow.python.ops import variables
 from tensorflow.python.platform import gfile
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import checkpoint_management
+from tensorflow.python.training import py_checkpoint_reader
 from tensorflow.python.training.saving import saveable_object_util
 from tensorflow.python.util.tf_export import tf_export
 
@@ -63,7 +65,7 @@ def load_checkpoint(ckpt_dir_or_file):
   if filename is None:
     raise ValueError("Couldn't find 'checkpoint' file or checkpoints in "
                      "given directory %s" % ckpt_dir_or_file)
-  return pywrap_tensorflow.NewCheckpointReader(filename)
+  return py_checkpoint_reader.NewCheckpointReader(filename)
 
 
 @tf_export("train.load_variable")
@@ -86,13 +88,27 @@ def load_variable(ckpt_dir_or_file, name):
 
 @tf_export("train.list_variables")
 def list_variables(ckpt_dir_or_file):
-  """Returns list of all variables in the checkpoint.
+  """Lists the checkpoint keys and shapes of variables in a checkpoint.
+
+  Checkpoint keys are paths in a checkpoint graph.
+
+  Example usage:
+
+    ```python
+  import tensorflow as tf
+  import os
+  ckpt_directory = "/tmp/training_checkpoints/ckpt"
+  ckpt = tf.train.Checkpoint(optimizer=optimizer, model=model)
+  manager = tf.train.CheckpointManager(ckpt, ckpt_directory, max_to_keep=3)
+  train_and_checkpoint(model, manager)
+  tf.train.list_variables(manager.latest_checkpoint)
+  ```
 
   Args:
     ckpt_dir_or_file: Directory with checkpoints file or path to checkpoint.
 
   Returns:
-    List of tuples `(name, shape)`.
+    List of tuples `(key, shape)`.
   """
   reader = load_checkpoint(ckpt_dir_or_file)
   variable_map = reader.get_variable_to_shape_map()
@@ -228,6 +244,10 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
   Supports loading into partitioned variables, which are represented as
   `'<variable>/part_<part #>'`.
 
+  Assignment map can be a dict, or a list of pairs.  The latter is
+  necessary to initialize multiple variables in the current graph from
+  the same variable in the checkpoint.
+
   Example:
 
   ```python
@@ -274,13 +294,14 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
 
   Args:
     ckpt_dir_or_file: Directory with checkpoints file or path to checkpoint.
-    assignment_map: Dict, where keys are names of the variables in the
-      checkpoint and values are current variables or names of current variables
-      (in default graph).
+    assignment_map: Dict, or a list of key-value pairs, where keys are names
+      of the variables in the checkpoint and values are current variables or
+      names of current variables (in default graph).
 
   Raises:
     ValueError: If missing variables in current graph, or if missing
       checkpoints or tensors in checkpoints.
+
   """
   init_from_checkpoint_fn = lambda _: _init_from_checkpoint(
       ckpt_dir_or_file, assignment_map)
@@ -296,8 +317,9 @@ def _init_from_checkpoint(ckpt_dir_or_file, assignment_map):
   ckpt_file = _get_checkpoint_filename(ckpt_dir_or_file)
   reader = load_checkpoint(ckpt_dir_or_file)
   variable_map = reader.get_variable_to_shape_map()
-  for tensor_name_in_ckpt, current_var_or_name in sorted(
-      six.iteritems(assignment_map)):
+  if isinstance(assignment_map, abc.Mapping):
+    assignment_map = six.iteritems(assignment_map)
+  for tensor_name_in_ckpt, current_var_or_name in sorted(assignment_map):
     var = None
     # Check if this is Variable object or list of Variable objects (in case of
     # partitioned variables).
@@ -330,7 +352,7 @@ def _init_from_checkpoint(ckpt_dir_or_file, assignment_map):
               ))
         var_name = var.name
       else:
-        var_name = ",".join([v.name for v in var])
+        var_name = ",".join(v.name for v in var)
       _set_variable_or_list_initializer(var, ckpt_file, tensor_name_in_ckpt)
       logging.debug("Initialize variable %s from checkpoint %s with %s",
                     var_name, ckpt_dir_or_file, tensor_name_in_ckpt)

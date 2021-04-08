@@ -102,9 +102,30 @@ class HloComputation {
     std::vector<std::unique_ptr<HloInstruction>> instructions_;
   };
 
+  // Helper class to automatically set the OpMetadata for every instruction
+  // added to a computation.
+  class MetadataBuilder {
+   public:
+    MetadataBuilder(HloComputation* computation, const OpMetadata& metadata)
+        : computation_(computation), metadata_(metadata) {}
+
+    HloInstruction* AddInstruction(
+        std::unique_ptr<HloInstruction> instruction) {
+      instruction->set_metadata(metadata_);
+      return computation_->AddInstruction(std::move(instruction));
+    }
+
+   private:
+    HloComputation* computation_;
+    OpMetadata metadata_;
+  };
+
+  ~HloComputation();
+
   // Add an instruction to the computation. The computation takes ownership of
   // the instruction.
-  HloInstruction* AddInstruction(std::unique_ptr<HloInstruction> instruction);
+  HloInstruction* AddInstruction(std::unique_ptr<HloInstruction> instruction,
+                                 const std::string& new_name = "");
 
   // Remove the param_no'th parameter from the computation.
   // Note this is only applicatable to the computation for the fusion
@@ -214,7 +235,8 @@ class HloComputation {
   //     calls.
   static StatusOr<std::unique_ptr<HloComputation>> CreateFromProto(
       const HloComputationProto& proto,
-      const absl::flat_hash_map<int64, HloComputation*>& computation_map);
+      const absl::flat_hash_map<int64, HloComputation*>& computation_map,
+      bool prohibit_empty_literal = true);
 
   using InstructionSequence = tensorflow::gtl::iterator_range<
       UnwrappingIterator<std::list<std::unique_ptr<HloInstruction>>::iterator>>;
@@ -291,7 +313,19 @@ class HloComputation {
   ProgramShape ComputeProgramShape(bool include_ids = true) const;
 
   // Return whether `*this` and `other` are functionally equivalent.
-  bool Equal(const HloComputation& other, bool is_layout_sensitive) const;
+  bool Equal(const HloComputation& other, bool is_layout_sensitive) const {
+    return EqualInternal(other, is_layout_sensitive,
+                         /*ignore_channel_id_values=*/false);
+  }
+
+  // Same as Equal() but ignores channel ID value mismatches on instructions, as
+  // long as the two instructions both have channel IDs or neither has a channel
+  // ID.
+  bool EqualIgnoringChannelIdValues(const HloComputation& other,
+                                    bool is_layout_sensitive) const {
+    return EqualInternal(other, is_layout_sensitive,
+                         /*ignore_channel_id_values=*/true);
+  }
 
   // Return whether `*this` and `other` are functionally equivalent.
   bool operator==(const HloComputation& other) const {
@@ -315,7 +349,7 @@ class HloComputation {
   // instruction. Removes old instruction from computation. Precondition:
   // old_instruction and new_instruction must have the compatible shapes.
   // If |new_instruction| doesn't have any sharding information it will
-  // recieve the sharding information of |old_instruction|.
+  // receive the sharding information of |old_instruction|.
   Status ReplaceInstruction(HloInstruction* old_instruction,
                             HloInstruction* new_instruction);
 
@@ -371,7 +405,8 @@ class HloComputation {
                           std::unique_ptr<HloInstruction>>
           replacements,
       absl::Span<const HloInstruction* const> extra_parameters = {},
-      HloCloneContext* context = nullptr, const string& suffix = "clone");
+      HloCloneContext* context = nullptr, const string& suffix = "clone",
+      const HloInstruction* new_root = nullptr);
 
   // Convenience overloads for CloneWithReplacements.  You want to do
   //
@@ -400,7 +435,7 @@ class HloComputation {
   // the HLO computation with the exception of fusion computation. A parameter
   // instruction is removable for a fusion computation.
   //
-  // Note that IsSafelyRemovable() is a necassarily condition to remove an
+  // Note that IsSafelyRemovable() is a necessary condition to remove an
   // instruction rather than a sufficient condition. For example, instructions
   // with side-effect (e.g., Send, Infeed) may be removed from a computation,
   // but the transformation must guarantee the invariants relevant to the
@@ -421,7 +456,9 @@ class HloComputation {
   bool HasSideEffect() const;
 
   // Returns if this computation is a fusion computation.
-  bool IsFusionComputation() const { return fusion_instruction_ != nullptr; }
+  // Do not use this method to determine if fusion_instruction_ != nullptr.
+  // Instead, directly do: FusionInstruction() != nullptr
+  bool IsFusionComputation() const { return is_fusion_computation_; }
 
   // Returns if this computation is the entry computation of the module.
   bool IsEntryComputation() const;
@@ -431,6 +468,7 @@ class HloComputation {
   HloInstruction* FusionInstruction() const { return fusion_instruction_; }
   void SetFusionInstruction(HloInstruction* fusion_instruction) {
     fusion_instruction_ = fusion_instruction;
+    is_fusion_computation_ |= (fusion_instruction != nullptr);
   }
 
   // Clear the unique ID of the computation so that it can be re-assigned, such
@@ -450,6 +488,15 @@ class HloComputation {
 
   int64 unique_id() const { return unique_id_; }
 
+  // Deallocate instructions that are marked by "RemoveInstruction". The two
+  // stage clean up process is designed such that HloPass can have stable
+  // internal pointers to HloInstructions while we create and remove
+  // HloInstructions in a pass.
+  void Cleanup() { to_be_deleted_.clear(); }
+
+  // Returns true if a given instruction is marked dead in this computation.
+  bool IsMarkedAsDead(const HloInstruction* inst);
+
  private:
   explicit HloComputation(
       const string& name, int parameter_count,
@@ -459,6 +506,10 @@ class HloComputation {
   // Internal helper for adding instructions.
   HloInstruction* AddInstructionInternal(
       std::unique_ptr<HloInstruction> instruction);
+
+  // Internal helper for comparison with different options.
+  bool EqualInternal(const HloComputation& other, bool is_layout_sensitive,
+                     bool ignore_channel_id_values) const;
 
   // Fuses HLOs in instructions_to_fuse into fusion_instruction.
   //
@@ -480,7 +531,7 @@ class HloComputation {
 
   enum VisitState { kVisiting, kVisited };
   void ComputeInstructionPostOrder(
-      const HloComputation::ChannelDependencyGroup& channel_dependency_map,
+      const HloComputation::ChannelDependencyGroup& channel_dependency_group,
       std::vector<HloInstruction*>* post_order, HloInstruction* root,
       absl::flat_hash_map<HloInstruction*, VisitState>* visited) const;
 
@@ -494,8 +545,16 @@ class HloComputation {
   HloInstruction* root_instruction_;
 
   // If this computation is a fusion computation, this field points to the
-  // corresponding fusion instruction.  Otherwise, this is null.
+  // corresponding fusion instruction (if it is live). Otherwise, this is null.
   HloInstruction* fusion_instruction_;
+
+  // Determines whether this computation is a fusion computation. A fusion
+  // computation ordinarily also has a non-null fusion_instruction_. However, if
+  // a fusion instruction is removed during compilation, the fusion computation
+  // becomes unreachable, and its fusion_instruction_ is set to null. We still
+  // need to regard such computations as fusion computations for HLO scheduling
+  // purposes.
+  bool is_fusion_computation_;
 
   // Module containing this computation.
   HloModule* parent_ = nullptr;
@@ -508,10 +567,69 @@ class HloComputation {
   absl::flat_hash_map<const HloInstruction*, InstructionList::iterator>
       instruction_iterators_;
 
+  // Removed instructions are moved into to_be_deleted_ first and then
+  // deallocated when Cleanup is called.
+  std::vector<std::unique_ptr<HloInstruction>> to_be_deleted_;
+
   std::vector<HloInstruction*> param_instructions_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(HloComputation);
 };
+
+template <typename HloInstructionPtr>
+Status HloComputation::Accept(
+    DfsHloVisitorBase<HloInstructionPtr>* visitor) const {
+  // Visit unreachable roots. Beware that the visitor might delete the currently
+  // visited root, which would invalidate iterators if the unreachable roots
+  // weren't computed ahead of time.
+  for (HloInstruction* root : CollectUnreachableRoots()) {
+    VLOG(3) << "Traversing unreachable root: " << root->ToString();
+    // Call FinishVisit only at the end.
+    TF_RETURN_IF_ERROR(root->Accept(visitor, /*call_finish_visit=*/false));
+  }
+  // Visit the computation root instruction last.
+  return root_instruction()->Accept(visitor, /*call_finish_visit=*/true);
+}
+
+// Explicit instantiations.
+template Status HloComputation::Accept(DfsHloVisitor* visitor) const;
+template Status HloComputation::Accept(ConstDfsHloVisitor* visitor) const;
+
+template <typename HloInstructionPtr>
+Status HloComputation::AcceptOrdered(
+    DfsHloVisitorBase<HloInstructionPtr>* visitor,
+    absl::Span<HloInstruction* const> order) const {
+  VLOG(3) << "Accepting visitor with order.";
+  for (HloInstruction* root : CollectUnreachableRoots()) {
+    TF_RET_CHECK(absl::c_linear_search(order, root)) << root->ToString();
+  }
+  TF_RET_CHECK(order.size() == instruction_count());
+  absl::flat_hash_set<const HloInstruction*> visited;
+  for (const HloInstruction* instruction : order) {
+    VLOG(3) << "Visiting ordered: " << instruction->ToString();
+    TF_RET_CHECK(instruction_iterators_.contains(instruction))
+        << "Instruction " << instruction->name() << " is not in computation "
+        << name();
+    TF_RET_CHECK(!visited.contains(instruction))
+        << "Instruction " << instruction->name()
+        << " appears more than once in order";
+    HloInstruction* mutable_instruction =
+        const_cast<HloInstruction*>(instruction);
+    TF_RETURN_IF_ERROR(visitor->Preprocess(mutable_instruction));
+    TF_RETURN_IF_ERROR(mutable_instruction->Visit(visitor));
+    visitor->SetVisited(*mutable_instruction);
+    TF_RETURN_IF_ERROR(visitor->Postprocess(mutable_instruction));
+    visited.insert(instruction);
+  }
+  TF_RETURN_IF_ERROR(visitor->FinishVisit(root_instruction()));
+  return Status::OK();
+}
+
+// Explicit instantiations.
+template Status HloComputation::AcceptOrdered(
+    DfsHloVisitor*, absl::Span<HloInstruction* const>) const;
+template Status HloComputation::AcceptOrdered(
+    ConstDfsHloVisitor*, absl::Span<HloInstruction* const>) const;
 
 }  // namespace xla
 

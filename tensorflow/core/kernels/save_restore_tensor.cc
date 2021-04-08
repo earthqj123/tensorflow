@@ -59,7 +59,7 @@ void SaveTensors(
                               std::numeric_limits<int>::max()),
               errors::InvalidArgument("Too many inputs to SaveTensors"));
   const int N = static_cast<int>(tensor_names_t.NumElements());
-  const string* tensor_shapes_and_slices_ptr = nullptr;
+  const tstring* tensor_shapes_and_slices_ptr = nullptr;
   if (save_slices) {
     const Tensor& tensor_shapes_and_slices_t = context->input(2);
     OP_REQUIRES(
@@ -103,7 +103,7 @@ void SaveTensors(
     TensorShape shape(input.shape());
     TensorSlice slice(input.dims());
     if (save_slices && !tensor_shapes_and_slices_ptr[i].empty()) {
-      const string& shape_spec = tensor_shapes_and_slices_ptr[i];
+      const tstring& shape_spec = tensor_shapes_and_slices_ptr[i];
       TensorShape slice_shape;
       OP_REQUIRES_OK(context, checkpoint::ParseShapeAndSlice(
                                   shape_spec, &shape, &slice, &slice_shape));
@@ -192,7 +192,8 @@ void RestoreTensor(OpKernelContext* context,
   TensorShape output_shape(saved_shape);
   TensorSlice slice_to_load(saved_shape.dims());
   if (restore_slice) {
-    const string& shape_spec = context->input(2).flat<tstring>()(restore_index);
+    const tstring& shape_spec =
+        context->input(2).flat<tstring>()(restore_index);
     if (!shape_spec.empty()) {
       TensorShape parsed_shape;
       OP_REQUIRES_OK(context, checkpoint::ParseShapeAndSlice(
@@ -300,6 +301,24 @@ struct RestoreOp {
       TF_RETURN_IF_ERROR(
           reader->LookupSlice(tensor_name, parsed_slice, restored_tensor));
     }
+    if (VLOG_IS_ON(5)) {
+      if (restored_tensor->dtype() == DT_FLOAT) {
+        const float* t_data = restored_tensor->flat<float>().data();
+        float min = std::numeric_limits<float>::infinity();
+        float max = -std::numeric_limits<float>::infinity();
+        double avg = 0.0;
+        for (int i = 0; i < restored_tensor->NumElements(); ++i) {
+          if (t_data[i] < min) min = t_data[i];
+          if (t_data[i] > max) max = t_data[i];
+          avg += t_data[i];
+        }
+        VLOG(5) << " min " << min << " max " << max << " avg "
+                << avg / restored_tensor->NumElements() << " total elts "
+                << restored_tensor->NumElements();
+      }
+    }
+    VLOG(1) << "Done restoring tensor " << idx << " : " << tensor_name << " : "
+            << restored_full_shape.num_elements();
     return Status::OK();
   }
 

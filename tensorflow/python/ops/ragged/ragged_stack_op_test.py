@@ -263,6 +263,12 @@ class RaggedStackOpTest(test_util.TensorFlowTestCase,
               [[b'a00', b'a01'], [b'a10', b'a11'], [b'a20', b'a21']],
               [[b'b00', b'b01', b'b02'], [b'b10', b'b11', b'b12']]]),
       dict(
+          descr='ragged_stack([1D, 1D], axis=0)',
+          ragged_ranks=[0, 0],
+          rt_inputs=(['a', 'b'], ['c', 'd', 'e']),
+          axis=0,
+          expected=[[b'a', b'b'], [b'c', b'd', b'e']]),
+      dict(
           descr='ragged_stack([uniform, ragged], axis=0)',
           ragged_ranks=[0, 1],
           rt_inputs=(
@@ -313,6 +319,26 @@ class RaggedStackOpTest(test_util.TensorFlowTestCase,
           rt_inputs=([['a00', 'a01'], [], ['a20', 'a21']],),
           axis=0,
           expected=[[[b'a00', b'a01'], [], [b'a20', b'a21']]]),
+      dict(
+          descr='One input (uniform 0D)',
+          rt_inputs=(1,),
+          ragged_ranks=[0],
+          axis=0,
+          expected=[1]),
+      dict(
+          descr='One input (uniform 1D)',
+          rt_inputs=([1, 2],),
+          ragged_ranks=[0],
+          axis=0,
+          expected=[[1, 2]],
+          expected_ragged_rank=1),
+      dict(
+          descr='One input (uniform 2D)',
+          rt_inputs=([[1, 2], [3, 4], [5, 6]],),
+          ragged_ranks=[0],
+          axis=0,
+          expected=[[[1, 2], [3, 4], [5, 6]]],
+          expected_ragged_rank=2),
   )   # pyformat: disable
   def testRaggedStack(self,
                       descr,
@@ -359,8 +385,8 @@ class RaggedStackOpTest(test_util.TensorFlowTestCase,
           message='axis=3 out of bounds: expected -3<=axis<3'),
   )
   def testError(self, rt_inputs, axis, error, message):
-    self.assertRaisesRegexp(error, message, ragged_concat_ops.stack, rt_inputs,
-                            axis)
+    self.assertRaisesRegex(error, message, ragged_concat_ops.stack, rt_inputs,
+                           axis)
 
   def testSingleTensorInput(self):
     """Tests ragged_stack with a single tensor input.

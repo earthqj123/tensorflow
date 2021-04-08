@@ -24,6 +24,7 @@ import os
 from google.protobuf import message
 from google.protobuf import text_format
 
+from tensorflow.core.protobuf import graph_debug_info_pb2
 from tensorflow.core.protobuf import meta_graph_pb2
 from tensorflow.core.protobuf import saved_model_pb2
 from tensorflow.python.framework import ops
@@ -39,11 +40,41 @@ from tensorflow.python.util import deprecation
 from tensorflow.python.util.tf_export import tf_export
 
 
+def parse_saved_model_with_debug_info(export_dir):
+  """Reads the savedmodel as well as the graph debug info.
+
+  Args:
+    export_dir: Directory containing the SavedModel and GraphDebugInfo files.
+
+  Returns:
+    `SavedModel` and `GraphDebugInfo` protocol buffers.
+
+  Raises:
+    IOError: If the saved model file does not exist, or cannot be successfully
+    parsed. Missing graph debug info file is fine.
+  """
+  saved_model = _parse_saved_model(export_dir)
+
+  debug_info_path = os.path.join(
+      saved_model_utils.get_debug_dir(export_dir),
+      constants.DEBUG_INFO_FILENAME_PB)
+  debug_info = graph_debug_info_pb2.GraphDebugInfo()
+  if file_io.file_exists(debug_info_path):
+    with file_io.FileIO(debug_info_path, "rb") as debug_file:
+      try:
+        debug_info.ParseFromString(debug_file.read())
+      except message.DecodeError as e:
+        raise IOError("Cannot parse file %s: %s." % (debug_info_path, str(e)))
+
+  return (saved_model, debug_info)
+
+
 def parse_saved_model(export_dir):
   """Reads the savedmodel.pb or savedmodel.pbtxt file containing `SavedModel`.
 
   Args:
-    export_dir: Directory containing the SavedModel file.
+    export_dir: String or Pathlike, path to the directory containing the
+    SavedModel file.
 
   Returns:
     A `SavedModel` protocol buffer.
@@ -53,34 +84,36 @@ def parse_saved_model(export_dir):
   """
   # Build the path to the SavedModel in pbtxt format.
   path_to_pbtxt = os.path.join(
-      compat.as_bytes(export_dir),
+      compat.as_bytes(compat.path_to_str(export_dir)),
       compat.as_bytes(constants.SAVED_MODEL_FILENAME_PBTXT))
   # Build the path to the SavedModel in pb format.
   path_to_pb = os.path.join(
-      compat.as_bytes(export_dir),
+      compat.as_bytes(compat.path_to_str(export_dir)),
       compat.as_bytes(constants.SAVED_MODEL_FILENAME_PB))
 
   # Parse the SavedModel protocol buffer.
   saved_model = saved_model_pb2.SavedModel()
   if file_io.file_exists(path_to_pb):
+    with file_io.FileIO(path_to_pb, "rb") as f:
+      file_content = f.read()
     try:
-      file_content = file_io.FileIO(path_to_pb, "rb").read()
       saved_model.ParseFromString(file_content)
       return saved_model
     except message.DecodeError as e:
       raise IOError("Cannot parse file %s: %s." % (path_to_pb, str(e)))
   elif file_io.file_exists(path_to_pbtxt):
+    with file_io.FileIO(path_to_pbtxt, "rb") as f:
+      file_content = f.read()
     try:
-      file_content = file_io.FileIO(path_to_pbtxt, "rb").read()
       text_format.Merge(file_content.decode("utf-8"), saved_model)
       return saved_model
     except text_format.ParseError as e:
       raise IOError("Cannot parse file %s: %s." % (path_to_pbtxt, str(e)))
   else:
-    raise IOError("SavedModel file does not exist at: %s/{%s|%s}" %
-                  (export_dir,
-                   constants.SAVED_MODEL_FILENAME_PBTXT,
-                   constants.SAVED_MODEL_FILENAME_PB))
+    raise IOError(
+        "SavedModel file does not exist at: %s%s{%s|%s}" %
+        (export_dir, os.path.sep, constants.SAVED_MODEL_FILENAME_PBTXT,
+         constants.SAVED_MODEL_FILENAME_PB))
 
 
 # TODO(b/120594573): Make this symbol also available as private, so that
@@ -137,7 +170,7 @@ def _get_main_op_tensor(
 
   Args:
     meta_graph_def_to_load: The meta graph def from the SavedModel to be loaded.
-    init_op_key: name of collection to check; should be one of MAIN_OP_KEY
+    init_op_key: name of the collection to check; should be one of MAIN_OP_KEY
       or the deprecated LEGACY_INIT_OP_KEY
 
   Returns:

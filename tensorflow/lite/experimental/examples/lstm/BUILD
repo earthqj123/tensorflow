@@ -2,13 +2,26 @@ load("//tensorflow:tensorflow.bzl", "py_test")
 
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
+)
+
+py_library(
+    name = "input_data",
+    srcs = ["input_data.py"],
+    srcs_version = "PY3",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//tensorflow/python:framework",
+        "//tensorflow/python:platform",
+        "//third_party/py/numpy",
+        "@six_archive//:six",
+    ],
 )
 
 py_library(
     name = "rnn",
     srcs = ["rnn.py"],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/lite/python:op_hint",
@@ -23,7 +36,7 @@ py_library(
 py_library(
     name = "rnn_cell",
     srcs = ["rnn_cell.py"],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/lite/python:op_hint",
@@ -35,19 +48,21 @@ py_library(
 
 py_test(
     name = "unidirectional_sequence_lstm_test",
-    size = "large",
+    size = "medium",
     srcs = ["unidirectional_sequence_lstm_test.py"],
-    python_version = "PY2",
-    srcs_version = "PY2AND3",
+    python_version = "PY3",
+    srcs_version = "PY3",
     tags = [
         "no_oss",
         "no_pip",
+        # Coverage test is extremely slow.
+        "nozapfhahn",
     ],
     deps = [
+        ":input_data",
         ":rnn",
         ":rnn_cell",
         "//tensorflow:tensorflow_py",
-        "//tensorflow/examples/tutorials/mnist:input_data",
         "//tensorflow/lite/python:lite",
         "//tensorflow/python:framework",
         "//tensorflow/python:platform",
@@ -58,19 +73,21 @@ py_test(
 
 py_test(
     name = "unidirectional_sequence_rnn_test",
-    size = "large",
+    size = "medium",
     srcs = ["unidirectional_sequence_rnn_test.py"],
-    python_version = "PY2",
-    srcs_version = "PY2AND3",
+    python_version = "PY3",
+    srcs_version = "PY3",
     tags = [
         "no_oss",
         "no_pip",
+        # Coverage test is extremely slow.
+        "nozapfhahn",
     ],
     deps = [
+        ":input_data",
         ":rnn",
         ":rnn_cell",
         "//tensorflow:tensorflow_py",
-        "//tensorflow/examples/tutorials/mnist:input_data",
         "//tensorflow/lite/python:lite",
         "//tensorflow/python:framework_test_lib",
         "//tensorflow/python:platform",
@@ -81,19 +98,21 @@ py_test(
 
 py_test(
     name = "bidirectional_sequence_lstm_test",
-    size = "large",
+    size = "medium",
     srcs = ["bidirectional_sequence_lstm_test.py"],
-    python_version = "PY2",
-    srcs_version = "PY2AND3",
+    python_version = "PY3",
+    srcs_version = "PY3",
     tags = [
         "no_oss",
         "no_pip",
+        # Coverage test is extremely slow.
+        "nozapfhahn",
     ],
     deps = [
+        ":input_data",
         ":rnn",
         ":rnn_cell",
         "//tensorflow:tensorflow_py",
-        "//tensorflow/examples/tutorials/mnist:input_data",
         "//tensorflow/lite/python:lite",
         "//tensorflow/python:framework_test_lib",
         "//tensorflow/python:platform",
@@ -104,19 +123,21 @@ py_test(
 
 py_test(
     name = "bidirectional_sequence_rnn_test",
-    size = "large",
+    size = "medium",
     srcs = ["bidirectional_sequence_rnn_test.py"],
-    python_version = "PY2",
-    srcs_version = "PY2AND3",
+    python_version = "PY3",
+    srcs_version = "PY3",
     tags = [
         "no_oss",
         "no_pip",
+        # Coverage test is extremely slow.
+        "nozapfhahn",
     ],
     deps = [
+        ":input_data",
         ":rnn",
         ":rnn_cell",
         "//tensorflow:tensorflow_py",
-        "//tensorflow/examples/tutorials/mnist:input_data",
         "//tensorflow/lite/python:lite",
         "//tensorflow/python:framework_test_lib",
         "//tensorflow/python:platform",
@@ -127,7 +148,7 @@ py_test(
 
 py_library(
     name = "tflite_lstm_ops",
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     visibility = ["//visibility:public"],
     deps = [
         ":rnn",

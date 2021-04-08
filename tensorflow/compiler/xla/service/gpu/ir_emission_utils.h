@@ -18,10 +18,17 @@ limitations under the License.
 
 #include <utility>
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Value.h"
+#include "mlir/IR/Operation.h"  // from @llvm-project
+#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
+#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/lhlo_ops.h"
+#include "tensorflow/compiler/xla/service/buffer_assignment.h"
+#include "tensorflow/compiler/xla/service/gpu/gpu_device_info.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_instructions.h"
+#include "tensorflow/core/platform/stream_executor_no_cuda.h"
 
 // TODO(jlebar): Move functions related to cublas/cudnn to a separate file; they
 // don't belong in "ir_emission_utils".
@@ -113,7 +120,7 @@ bool IsCustomCallToDnnBatchNorm(const HloInstruction& hlo);
 // memory used by cudnn.  Callers shouldn't inspect scratch_memory, as its value
 // is not well-defined.
 //
-// CudnnConvRewriter lowers kConvolution HLOs to these custom calls.
+// GpuConvRewriter lowers kConvolution HLOs to these custom calls.
 // When it does so, it chooses algorithm -1 and 0 bytes of scratch space.  Later
 // on in the pipeline, CudnnConvAlgorithmChooser chooses an explicit
 // algorithm for each conv and sets the amount of scratch space needed.
@@ -156,26 +163,45 @@ bool ImplementedAsLibraryCall(const HloInstruction& hlo);
 // Returns true if either the dimensions being reduced or the dimensions being
 // kept are contiguous in the input of the reduce instruction.
 bool IsReductionFromOrToContiguousDimensions(const HloInstruction& reduce);
+bool IsReductionFromOrToContiguousDimensions(mlir::Operation* reduce);
+
+// Returns whether unnested_hlo is an input fusion whose root is either a slice
+// or a tuple of slices. If verify_no_strides is true, returns false unless all
+// ROOT slices have no strides.
+bool IsInputFusibleSlices(mlir::Operation* unnested_hlo,
+                          bool verify_no_strides);
+
+struct ReductionDimensions {
+  // Indicates whether the reduction is a row reduction or a column reduction.
+  bool is_row_reduction;
+
+  // Contains the size of the three contiguous components for
+  // the reduction [depth, height, width] (major-to-minor ordering).
+  //
+  // For row reduction, we do: [D, H, W] -> [D, H].
+  // For column reduction, we do: [D, H, W] -> [D, W].
+  std::array<int64, 3> dimensions;
+};
 
 // Given the input shape and dimensions to reduce for a reduction, returns
-// <is_row_reduction, DimensionVector>:
-// is_row_reduction:  indicates whether the reduction is a row reduction or a
-//   column reduction.
-// DimensionVector: contains the size of the three contiguous components for the
-//   reduction [depth, height, width]. For row reduction, height is the size of
-//   the dimensions to keep, depth is the size of the dimensions to reduce that
-//   are more major than the dimensions to keep, and width is the size of the
-//   dimensions to reduce that are more minor than the dimensions to keep. For
-//   column reduction, height is the size of dimensions to reduce, depth is the
-//   the size of the dimensions to keep that are more major than the dimensions
-//   to reduce, and width is the size of the dimensions to keep that are more
-//   minor than the dimensions to reduce.
+// ReductionDimensions.
 //
 // Prerequisite: the reduction instruction passes the check
 // IsReductionFromOrToContiguousDimensions, which guarantees either the
 // dimensions to reduce or the dimensions to keep are consecutive.
-std::pair<bool, DimensionVector> GetReductionKindAndContiguousComponents(
-    const Shape& input_shape, absl::Span<const int64> dims_to_reduce);
+ReductionDimensions GetReductionKindAndContiguousComponents(
+    const HloInstruction& reduce);
+ReductionDimensions GetReductionKindAndContiguousComponents(
+    mlir::Operation* reduce);
+
+// Get tiling per thread for the given reduction in dimensions [D, H, W] per
+// thread.
+// If the device isn't known pass null for device_description and you will get
+// non-optimized value.
+std::array<int64, 3> GetReductionTiling(
+    const ReductionDimensions& reduction_dimensions,
+    int smallest_input_dtype_bits,
+    absl::optional<CudaComputeCapability> cuda_compute_capability);
 
 // Emits call to "vprintf" with given format and arguments.
 llvm::Value* EmitPrintf(absl::string_view fmt,
@@ -198,6 +224,49 @@ llvm::Value* EmitFullWarpShuffleDown(llvm::Value* value, llvm::Value* offset,
 // Emits code that determines whether the current thread is thread 0 within
 // block 0 of the kernel.
 llvm::Value* IsBlock0Thread0(llvm::IRBuilder<>* b);
+
+// Returns whether the output of a fusion with reduction are consistent with
+// `first_reduce`.
+bool IsFusedReductionOutputConsistent(const HloInstruction* inst,
+                                      const HloInstruction* first_reduce);
+bool IsFusedReductionOutputConsistent(mlir::mhlo::ReduceOp inst,
+                                      mlir::mhlo::ReduceOp first_reduce);
+
+inline bool AreFusedReductionOutputsConsistent(
+    absl::Span<const HloInstruction* const> output_instructions,
+    const HloInstruction* first_reduce) {
+  return absl::c_all_of(output_instructions, [=](const HloInstruction* inst) {
+    return IsFusedReductionOutputConsistent(inst, first_reduce);
+  });
+}
+
+inline std::string MlirToString(mlir::Operation* op) {
+  std::string s;
+  {
+    llvm::raw_string_ostream os(s);
+    op->print(os);
+  }
+  return s;
+}
+
+int PartitionLmhloOperandsAndOutputs(mlir::Operation* op);
+std::vector<mlir::Value> GetHloOperands(mlir::Operation* op);
+std::vector<mlir::Value> GetHloOutputs(mlir::Operation* op);
+
+bool WritesMlirBuffer(mlir::Operation* op, mlir::Value operand);
+
+template <typename T>
+std::vector<T> ToStdVector(const llvm::SmallVectorImpl<T>& v) {
+  return std::vector<T>(v.begin(), v.end());
+}
+
+StatusOr<BufferAllocation::Slice> GetAllocationSliceForMlir(
+    mlir::Value v, absl::Span<const BufferAllocation> allocations,
+    std::string* constant_name = nullptr);
+
+bool CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
+    mlir::lmhlo::FusionOp fusion,
+    absl::Span<const BufferAllocation> allocations);
 
 }  // namespace gpu
 }  // namespace xla

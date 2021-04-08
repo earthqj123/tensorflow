@@ -18,8 +18,9 @@ limitations under the License.
 #include "tensorflow/core/framework/allocation_description.pb.h"
 #include "tensorflow/core/framework/log_memory.h"
 #include "tensorflow/core/framework/typed_allocator.h"
+#include "tensorflow/core/framework/variant.h"
 #include "tensorflow/lite/delegates/flex/util.h"
-#include "tensorflow/lite/string.h"
+#include "tensorflow/lite/string_type.h"
 #include "tensorflow/lite/string_util.h"
 
 namespace tflite {
@@ -94,24 +95,25 @@ class TfLiteTensorBuffer : public BaseTfLiteTensorBuffer {
 class StringTfLiteTensorBuffer : public BaseTfLiteTensorBuffer {
  public:
   explicit StringTfLiteTensorBuffer(const TfLiteTensor* tensor)
-      : StringTfLiteTensorBuffer(tensor, tensor->data.raw != nullptr
-                                             ? GetStringCount(tensor->data.raw)
-                                             : 0) {}
+      : StringTfLiteTensorBuffer(
+            tensor, tensor->data.raw != nullptr ? GetStringCount(tensor) : 0) {}
 
   ~StringTfLiteTensorBuffer() override {
     LogDeallocation();
-    tensorflow::TypedAllocator::Deallocate<tensorflow::string>(
-        tensorflow::cpu_allocator(), static_cast<tensorflow::string*>(data()),
+    tensorflow::TypedAllocator::Deallocate<tensorflow::tstring>(
+        tensorflow::cpu_allocator(), static_cast<tensorflow::tstring*>(data()),
         num_strings_);
   }
 
-  size_t size() const override { return num_strings_ * sizeof(string); }
+  size_t size() const override {
+    return num_strings_ * sizeof(tensorflow::tstring);
+  }
 
  private:
   StringTfLiteTensorBuffer(const TfLiteTensor* tensor, int num_strings)
       : BaseTfLiteTensorBuffer(
             num_strings != 0
-                ? tensorflow::TypedAllocator::Allocate<tensorflow::string>(
+                ? tensorflow::TypedAllocator::Allocate<tensorflow::tstring>(
                       tensorflow::cpu_allocator(), num_strings,
                       tensorflow::AllocationAttributes())
                 : nullptr),
@@ -119,9 +121,9 @@ class StringTfLiteTensorBuffer : public BaseTfLiteTensorBuffer {
     LogAllocation();
 
     if (data()) {
-      string* p = static_cast<string*>(data());
+      tensorflow::tstring* p = static_cast<tensorflow::tstring*>(data());
       for (size_t i = 0; i < num_strings_; ++p, ++i) {
-        auto ref = GetString(tensor->data.raw, i);
+        auto ref = GetString(tensor, i);
         p->assign(ref.str, ref.len);
       }
     }
@@ -148,7 +150,32 @@ tensorflow::Tensor BufferMap::GetTensor(int tensor_index) const {
   return id_to_tensor_.at(tensor_index);
 }
 
+const tensorflow::Tensor* BufferMap::GetTensorPtr(int tensor_index) const {
+  auto& tensor = id_to_tensor_.at(tensor_index);
+  return &tensor;
+}
+
 void BufferMap::SetFromTfLite(int tensor_index, const TfLiteTensor* tensor) {
+  // TODO(b/179094265): This is an experimental implementation, subject to
+  // change. This can be re-implemented with life cycle management mechanism
+  // like reference counting.
+  // In a different subgraph, it can load the TensorFlow tensor pointer of the
+  // given TensorFlow Lite tensor, which is stored in the `data` field. The
+  // memory management cycle of the shared TensorFlow's tensor will be managed
+  // by the buffer maps since the loaded tensors always will be kept in the
+  // buffer map.
+  //
+  // The life cycle of the pointer will be managed by the reference counting in
+  // the TensorFlow world and the pointer will be freed when all the buffer
+  // maps, who own it, are gone.
+  if (tensor->type == kTfLiteResource || tensor->type == kTfLiteVariant) {
+    const tensorflow::Tensor** tf_tensor_ptr =
+        reinterpret_cast<const tensorflow::Tensor**>(tensor->data.raw);
+    id_to_tensor_[tensor_index] = **tf_tensor_ptr;
+    owned_by_tf_.insert(tensor_index);
+    return;
+  }
+
   tensorflow::TensorShape shape;
   int num_dims = tensor->dims->size;
   for (int i = 0; i < num_dims; ++i) {

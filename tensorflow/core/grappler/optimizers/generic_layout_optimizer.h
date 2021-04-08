@@ -25,12 +25,20 @@ namespace grappler {
 // Optimize the data layout for convolutional models.
 class GenericLayoutOptimizer : public GraphOptimizer {
  public:
-  GenericLayoutOptimizer() : GenericLayoutOptimizer(RewriterConfig::DEFAULT) {}
+  GenericLayoutOptimizer()
+      : GenericLayoutOptimizer(RewriterConfig::DEFAULT,
+                               RewriterConfig::NO_CONVERSION_ON_CPU) {}
   explicit GenericLayoutOptimizer(RewriterConfig::Toggle opt_level)
-      : opt_level_(opt_level) {}
+      : GenericLayoutOptimizer(opt_level,
+                               RewriterConfig::NO_CONVERSION_ON_CPU) {}
+  explicit GenericLayoutOptimizer(RewriterConfig::Toggle opt_level,
+                                  RewriterConfig::CpuLayout layout_conversion)
+      : opt_level_(opt_level), cpu_layout_conversion_(layout_conversion) {}
   ~GenericLayoutOptimizer() override = default;
 
   string name() const override { return "layout"; };
+
+  bool UsesFunctionLibrary() const override { return false; }
 
   Status Optimize(Cluster* cluster, const GrapplerItem& item,
                   GraphDef* output) override;
@@ -40,6 +48,7 @@ class GenericLayoutOptimizer : public GraphOptimizer {
 
  private:
   RewriterConfig::Toggle opt_level_;
+  RewriterConfig::CpuLayout cpu_layout_conversion_;
 };
 
 }  // namespace grappler

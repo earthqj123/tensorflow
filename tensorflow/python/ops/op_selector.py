@@ -339,7 +339,7 @@ def _path_from(from_op, tensor, sources):
   if isinstance(from_op, ops.Tensor):
     from_op = from_op.op
 
-  visited_ops = set([x.op for x in sources])
+  visited_ops = set(x.op for x in sources)
   ops_to_visit = [_as_operation(tensor)]
   some_op_output = {}
   while ops_to_visit:
@@ -354,7 +354,7 @@ def _path_from(from_op, tensor, sources):
       while path_op != final_op:
         path_op = some_op_output[path_op]
         path.append(path_op)
-      return " <- ".join(["%s (%s)" % (x.name, x.type) for x in reversed(path)])
+      return " <- ".join("%s (%s)" % (x.name, x.type) for x in reversed(path))
     else:
       for inp in graph_inputs(op):
         if inp not in visited_ops and inp not in sources:
@@ -371,7 +371,7 @@ def map_subgraph(init_tensor, sources, disallowed_placeholders, visited_ops,
 
   Note: This function mutates visited_ops and op_outputs.
 
-  Arguments:
+  Args:
     init_tensor:  A Tensor or Operation where the subgraph terminates.
     sources:  A set of Tensors where subgraph extraction should stop.
     disallowed_placeholders: An optional set of ops which may not appear in the

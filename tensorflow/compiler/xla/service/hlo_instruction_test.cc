@@ -28,7 +28,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instructions.h"
-#include "tensorflow/compiler/xla/service/hlo_parser.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/test.h"
 #include "tensorflow/compiler/xla/test_helpers.h"
@@ -750,6 +749,64 @@ TEST_F(HloInstructionTest, PreserveTupleShapeThroughClone) {
   EXPECT_TRUE(ShapeUtil::Equal(tuple_clone->shape(), tuple->shape()));
 }
 
+TEST_F(HloInstructionTest, PreserveShardingThroughCompatibleClone) {
+  HloSharding sharding = HloSharding::AssignDevice(5);
+  HloComputation::Builder builder(TestName());
+  auto* constant = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR2<float>({
+          {1, 2},
+          {3, 4},
+      })));
+  auto* tuple =
+      builder.AddInstruction(HloInstruction::CreateTuple({constant, constant}));
+  tuple->set_sharding(sharding);
+  // Compatible with original shape as tuple tree structure and leaf ranks are
+  // identical
+  auto clone_shape = ShapeUtil::MakeShape(F32, {3, 3});
+  clone_shape = ShapeUtil::MakeTupleShape({clone_shape, clone_shape});
+  auto tuple_clone = tuple->CloneWithNewOperands(clone_shape, {});
+  EXPECT_EQ(tuple_clone->sharding(), sharding);
+}
+
+TEST_F(HloInstructionTest,
+       DoNotPreserveShardingThroughTupleTreeIncompatibleClone) {
+  HloSharding sharding = HloSharding::AssignDevice(5);
+  HloComputation::Builder builder(TestName());
+  auto* constant = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR2<float>({
+          {1, 2},
+          {3, 4},
+      })));
+  auto* tuple =
+      builder.AddInstruction(HloInstruction::CreateTuple({constant, constant}));
+  tuple->set_sharding(sharding);
+  // Incompatible with original shape as tuple tree structure is different
+  auto clone_shape = ShapeUtil::MakeShape(F32, {2, 2});
+  clone_shape =
+      ShapeUtil::MakeTupleShape({clone_shape, clone_shape, clone_shape});
+  auto tuple_clone = tuple->CloneWithNewOperands(clone_shape, {});
+  EXPECT_FALSE(tuple_clone->has_sharding());
+}
+
+TEST_F(HloInstructionTest,
+       DoNotPreserveShardingThroughLeafRankIncompatibleClone) {
+  HloSharding sharding = HloSharding::AssignDevice(5);
+  HloComputation::Builder builder(TestName());
+  auto* constant = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR2<float>({
+          {1, 2},
+          {3, 4},
+      })));
+  auto* tuple =
+      builder.AddInstruction(HloInstruction::CreateTuple({constant, constant}));
+  tuple->set_sharding(sharding);
+  // Incompatible with original shape as tuple tree structure is different
+  auto clone_shape = ShapeUtil::MakeShape(F32, {1, 2, 3});
+  clone_shape = ShapeUtil::MakeTupleShape({clone_shape, clone_shape});
+  auto tuple_clone = tuple->CloneWithNewOperands(clone_shape, {});
+  EXPECT_FALSE(tuple_clone->has_sharding());
+}
+
 TEST_F(HloInstructionTest, FusionOpWithCalledComputations) {
   // Create a fusion instruction containing a single unary operation.
   const Shape scalar_shape = ShapeUtil::MakeShape(F32, {});
@@ -951,7 +1008,7 @@ ENTRY entry (param: f32[]) -> (f32[], f32[], f32[]) {
  }
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnUnverifiedModule(hlo_string));
+                          ParseAndReturnVerifiedModule(hlo_string));
 
   auto* root = module->entry_computation()->root_instruction();
   auto* t1 = root->operand(0);
@@ -1187,11 +1244,12 @@ TEST_F(HloInstructionTest, FuseInstructionKeepsInstruction) {
     p2 = f32[32,32]{1,0} parameter(0)
     p3 = f32[32,32]{1,0} parameter(1)
     c1 = f32[] constant(1)
+    broadcast = f32[32,32]{1,0} broadcast(c1), dimensions={}
     mul = f32[32,32]{1,0} multiply(p2, p3)
-    ROOT add = f32[32,32]{1,0} fusion(mul, c1), kind=kLoop, calls=fused_add
+    ROOT add = f32[32,32]{1,0} fusion(mul, broadcast), kind=kLoop, calls=fused_add
   })";
   TF_ASSERT_OK_AND_ASSIGN(auto module,
-                          ParseAndReturnUnverifiedModule(kHloString));
+                          ParseAndReturnVerifiedModule(kHloString));
   HloInstruction* fused_add = module->entry_computation()->root_instruction();
   HloInstruction* mul = fused_add->mutable_operand(0);
   EXPECT_EQ(1, mul->user_count());
@@ -1215,11 +1273,12 @@ TEST_F(HloInstructionTest, FuseInstructionIntoMultiOutputKeepsInstruction) {
     p3 = f32[32,32]{1,0} parameter(1)
     c1 = f32[] constant(1)
     mul = f32[32,32]{1,0} multiply(p2, p3)
-    add = f32[32,32]{1,0} fusion(mul, c1), kind=kLoop, calls=fused_add
+    broadcast = f32[32,32]{1,0} broadcast(c1), dimensions={}
+    add = f32[32,32]{1,0} fusion(mul, broadcast), kind=kLoop, calls=fused_add
     ROOT root = (f32[32,32]{1,0}, f32[32,32]{1,0}) tuple(mul, add)
   })";
   TF_ASSERT_OK_AND_ASSIGN(auto module,
-                          ParseAndReturnUnverifiedModule(kHloString));
+                          ParseAndReturnVerifiedModule(kHloString));
   HloInstruction* root = module->entry_computation()->root_instruction();
   HloInstruction* mul = root->mutable_operand(0);
   HloInstruction* fused_add = root->mutable_operand(1);
@@ -1442,7 +1501,8 @@ TEST_F(HloInstructionTest, StringifyGather_0) {
                                        /*collapsed_slice_dims=*/{},
                                        /*start_index_map=*/{0, 1, 2, 3, 4},
                                        /*index_vector_dim=*/4),
-                                   /*slice_sizes=*/{30, 29, 28, 27, 26}));
+                                   /*slice_sizes=*/{30, 29, 28, 27, 26},
+                                   /*indices_are_sorted=*/false));
 
   auto module = CreateNewVerifiedModule();
   module->AddEntryComputation(builder.Build());
@@ -1477,7 +1537,8 @@ TEST_F(HloInstructionTest, StringifyGather_1) {
                                        /*collapsed_slice_dims=*/{},
                                        /*start_index_map=*/{0, 1, 2, 3, 4},
                                        /*index_vector_dim=*/2),
-                                   /*slice_sizes=*/{30, 29, 28, 27, 26}));
+                                   /*slice_sizes=*/{30, 29, 28, 27, 26},
+                                   /*indices_are_sorted=*/false));
 
   auto module = CreateNewVerifiedModule();
   module->AddEntryComputation(builder.Build());
@@ -1526,7 +1587,9 @@ TEST_F(HloInstructionTest, StringifyScatter) {
               /*update_window_dims=*/{4, 5, 6, 7, 8},
               /*inserted_window_dims=*/{},
               /*scatter_dims_to_operand_dims=*/{0, 1, 2, 3, 4},
-              /*index_vector_dim=*/2)));
+              /*index_vector_dim=*/2),
+          /*indices_are_sorted=*/false,
+          /*unique_indices=*/false));
   module->AddEntryComputation(builder.Build());
 
   EXPECT_EQ(
@@ -1540,7 +1603,7 @@ TEST_F(HloInstructionTest, StringifyScatter) {
       "to_apply=%Scatter.update");
 }
 
-TEST_F(HloInstructionTest, CanonnicalStringificationFusion) {
+TEST_F(HloInstructionTest, CanonicalStringificationFusion) {
   // Tests stringification of a simple op, fusion, while, and conditional.
   const Shape s1 = ShapeUtil::MakeShape(F32, {5, 10});
   const Shape s2 = ShapeUtil::MakeShape(F32, {20, 10});
@@ -1582,7 +1645,7 @@ TEST_F(HloInstructionTest, CanonnicalStringificationFusion) {
   EXPECT_EQ(fusion->ToString(options), expected_fusion);
 }
 
-TEST_F(HloInstructionTest, CanonnicalStringificationWhile) {
+TEST_F(HloInstructionTest, CanonicalStringificationWhile) {
   // Tests stringification of a simple op, fusion, while, and conditional.
   const Shape s1 = ShapeUtil::MakeShape(F32, {5, 10});
   const Shape s2 = ShapeUtil::MakeShape(F32, {20, 10});
@@ -1638,7 +1701,7 @@ TEST_F(HloInstructionTest, CanonnicalStringificationWhile) {
   EXPECT_EQ(loop->ToString(options), expected_loop);
 }
 
-TEST_F(HloInstructionTest, CanonnicalStringificationConditional) {
+TEST_F(HloInstructionTest, CanonicalStringificationConditional) {
   // Tests stringification of a simple op, fusion, while, and conditional.
   const Shape s1 = ShapeUtil::MakeShape(F32, {5, 10});
   const Shape s2 = ShapeUtil::MakeShape(F32, {20, 10});
@@ -1736,7 +1799,7 @@ ENTRY entry (param: s32[]) -> s32[] {
   // Check that deep clones really deep clones every instruction and
   // computations, without leaving dangling pointers to the old module.
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnUnverifiedModule(hlo_string));
+                          ParseAndReturnVerifiedModule(hlo_string));
   std::unique_ptr<HloModule> clone = module->Clone();
   for (HloComputation* computation : clone->computations()) {
     EXPECT_EQ(computation->parent(), clone.get());
@@ -1856,7 +1919,7 @@ TEST_F(HloInstructionTest, PreserveOperandPrecisionOnCloneConv) {
       dim_labels=b0f_0io->b0f, operand_precision={high,default}
   })";
   TF_ASSERT_OK_AND_ASSIGN(auto module,
-                          ParseAndReturnUnverifiedModule(kHloString));
+                          ParseAndReturnVerifiedModule(kHloString));
   auto* conv = module->entry_computation()->root_instruction();
 
   auto clone = conv->Clone();
@@ -1869,10 +1932,10 @@ TEST_F(HloInstructionTest, PreserveOuterDimensionPartitionsOnClone) {
   constexpr char kHloString[] = R"(
   HloModule test_module
   ENTRY test {
-    ROOT iota = f32[100] iota(), iota_dimension=1, outer_dimension_partitions={0, 50}
+    ROOT iota = f32[100] iota(), iota_dimension=0, outer_dimension_partitions={0, 50}
   })";
   TF_ASSERT_OK_AND_ASSIGN(auto module,
-                          ParseAndReturnUnverifiedModule(kHloString));
+                          ParseAndReturnVerifiedModule(kHloString));
   auto* iota = module->entry_computation()->root_instruction();
 
   auto clone = iota->Clone();

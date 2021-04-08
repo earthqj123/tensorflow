@@ -1,17 +1,24 @@
 # Description:
 #   Tensor bundle: a module to efficiently serialize and deserialize tensors.
 
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 load(
     "//tensorflow:tensorflow.bzl",
-    "cc_header_only_library",
     "if_not_windows",
+    "if_windows",
     "tf_cc_test",
     "tf_copts",
 )
 
+# buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.bzl", "cc_header_only_library")
+
+# buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.bzl", "filegroup")
+
 package(
     default_visibility = ["//visibility:public"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 # To be exported to tensorflow/core:mobile_srcs.
@@ -43,6 +50,7 @@ cc_library(
         "tensor_bundle.h",
     ],
     copts = tf_copts() + if_not_windows(["-Wno-sign-compare"]),
+    linkopts = if_windows(["-DEFAULTLIB:ws2_32.lib"]),
     deps = [
         ":naming",
         "//tensorflow/core:core_cpu_lib",
@@ -50,7 +58,6 @@ cc_library(
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:proto_text",
         "//tensorflow/core:protos_all_cc",
     ],
 )
@@ -71,7 +78,7 @@ cc_library(
 tf_cc_test(
     name = "tensor_bundle_test",
     srcs = ["tensor_bundle_test.cc"],
-    data = glob(["testdata/**"]),
+    data = ["//tensorflow/core/util/tensor_bundle/testdata:old_string_tensors"],
     tags = [
         "nomsan",
         "notsan",
@@ -82,8 +89,8 @@ tf_cc_test(
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core:tensor_testutil",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/framework:tensor_testutil",
     ],
 )

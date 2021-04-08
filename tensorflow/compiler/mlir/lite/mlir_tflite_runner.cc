@@ -28,26 +28,36 @@ limitations under the License.
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/SMLoc.h"
 #include "llvm/Support/SourceMgr.h"
-#include "mlir/IR/Function.h"  // TF:local_config_mlir
-#include "mlir/IR/MLIRContext.h"  // TF:local_config_mlir
-#include "mlir/IR/Module.h"  // TF:local_config_mlir
-#include "mlir/Parser.h"  // TF:local_config_mlir
-#include "tensorflow/compiler/mlir/lite/flatbuffer_translate.h"
+#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
+#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
+#include "mlir/IR/Dialect.h"  // from @llvm-project
+#include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "mlir/Parser.h"  // from @llvm-project
+#include "tensorflow/compiler/mlir/lite/flatbuffer_export.h"
+#include "tensorflow/compiler/mlir/lite/flatbuffer_export_flags.h"
+#include "tensorflow/compiler/mlir/lite/ir/tfl_ops.h"
+#include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/lite/delegates/flex/delegate.h"
 #include "tensorflow/lite/kernels/register.h"
 #include "tensorflow/lite/model.h"
+#include "tensorflow/lite/optional_debug_tools.h"
 
+using llvm::cl::desc;
+using llvm::cl::init;
 using llvm::cl::opt;
 
 // NOLINTNEXTLINE
-static opt<std::string> inputFileName(llvm::cl::Positional,
-                                      llvm::cl::desc("<input file>"),
-                                      llvm::cl::init("-"));
+static opt<std::string> input_filename(llvm::cl::Positional,
+                                       desc("<input file>"), init("-"));
+
+// NOLINTNEXTLINE
+static opt<bool> dump_state("dump-interpreter-state",
+                            desc("dump interpreter state post execution"),
+                            init(false));
 
 // TODO(jpienaar): Move these functions to some debug utils.
 static std::string TfLiteTensorDimString(const TfLiteTensor& tensor) {
@@ -69,6 +79,8 @@ static std::string TfLiteTensorString(const TfLiteTensor& tensor) {
   switch (tensor.type) {
     case kTfLiteInt32:
       return TfLiteTypedTensorString<int32_t>(tensor);
+    case kTfLiteUInt32:
+      return TfLiteTypedTensorString<uint32_t>(tensor);
     case kTfLiteInt64:
       return TfLiteTypedTensorString<int64_t>(tensor);
     case kTfLiteFloat32:
@@ -79,20 +91,22 @@ static std::string TfLiteTensorString(const TfLiteTensor& tensor) {
 }
 
 int main(int argc, char** argv) {
-  llvm::PrettyStackTraceProgram x(argc, argv);
   llvm::InitLLVM y(argc, argv);
-
   llvm::cl::ParseCommandLineOptions(argc, argv, "MLIR TFLite runner\n");
 
-  auto file_or_err = llvm::MemoryBuffer::getFileOrSTDIN(inputFileName.c_str());
+  auto file_or_err = llvm::MemoryBuffer::getFileOrSTDIN(input_filename.c_str());
   if (std::error_code error = file_or_err.getError()) {
-    LOG(ERROR) << argv[0] << ": could not open input file '" << inputFileName
+    LOG(ERROR) << argv[0] << ": could not open input file '" << input_filename
                << "': " << error.message() << "\n";
     return 1;
   }
 
   // Load the MLIR module.
-  mlir::MLIRContext context;
+  mlir::DialectRegistry registry;
+  registry.insert<mlir::TF::TensorFlowDialect, mlir::TFL::TensorFlowLiteDialect,
+                  mlir::StandardOpsDialect>();
+  mlir::MLIRContext context(registry);
+
   llvm::SourceMgr source_mgr;
   source_mgr.AddNewSourceBuffer(std::move(*file_or_err), llvm::SMLoc());
   mlir::OwningModuleRef module(mlir::parseSourceFile(source_mgr, &context));
@@ -106,9 +120,12 @@ int main(int argc, char** argv) {
 
   // Convert to flatbuffer.
   std::string serialized_flatbuffer;
-  if (tflite::MlirToFlatBufferTranslateFunction(
-          module.get(), &serialized_flatbuffer, emit_builtin_tflite_ops,
-          emit_select_tf_ops, emit_custom_ops))
+  tflite::FlatbufferExportOptions options;
+  options.emit_builtin_tflite_ops = emit_builtin_tflite_ops;
+  options.emit_custom_ops = emit_custom_ops;
+  options.emit_select_tf_ops = emit_select_tf_ops;
+  if (!tflite::MlirToFlatBufferTranslateFunction(module.get(), options,
+                                                 &serialized_flatbuffer))
     return 1;
 
   // Create TFLite interpreter & invoke converted program.
@@ -134,6 +151,8 @@ int main(int argc, char** argv) {
             TfLiteTypeGetName(out.type), TfLiteTensorDimString(out).c_str(),
             TfLiteTensorString(out).c_str());
   }
+
+  if (dump_state) tflite::PrintInterpreterState(interpreter.get());
 
   return 0;
 }

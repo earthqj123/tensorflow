@@ -1,15 +1,15 @@
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 py_binary(
     name = "label_image",
     srcs = ["label_image.py"],
     main = "label_image.py",
-    python_version = "PY2",
-    srcs_version = "PY2AND3",
+    python_version = "PY3",
+    srcs_version = "PY3",
     deps = [
-        "//tensorflow/lite/python:lite",
+        "//tensorflow:tensorflow_py",
     ],
 )

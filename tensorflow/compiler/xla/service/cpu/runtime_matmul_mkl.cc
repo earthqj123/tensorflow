@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#if defined(INTEL_MKL) && !defined(INTEL_MKL_DNN_ONLY)
+#if defined(ENABLE_MKL) && !defined(INTEL_MKL_DNN_ONLY)
 #include "tensorflow/compiler/xla/service/cpu/runtime_matmul_mkl.h"
 #include "third_party/intel_mkl_ml/include/mkl_cblas.h"
 #include "third_party/intel_mkl_ml/include/mkl_service.h"
@@ -33,7 +33,7 @@ namespace {
 
 // MatMul function is defined as: c = alpha * op(a) * op(b) + beta * c.
 // Since XLA MatMul does not used alpha, beta, we set them to 1.0 and 0.0.
-// Matrix lhs, rhs and out are all colum-major.
+// Matrix lhs, rhs and out are all column-major.
 void MatMulF32(const void* run_options_ptr, float* out, float* lhs, float* rhs,
                int64 m, int64 n, int64 k, int32 transpose_lhs,
                int32 transpose_rhs) {
@@ -55,7 +55,7 @@ void MatMulF32(const void* run_options_ptr, float* out, float* lhs, float* rhs,
 
 // MatMul function is defined as: c = alpha * op(a) * op(b) + beta * c.
 // Since XLA MatMul does not used alpha, beta, we set them to 1.0 and 0.0.
-// Matrix lhs, rhs and out are all colum-major.
+// Matrix lhs, rhs and out are all column-major.
 void MatMulF64(const void* run_options_ptr, double* out, double* lhs,
                double* rhs, int64 m, int64 n, int64 k, int32 transpose_lhs,
                int32 transpose_rhs) {
@@ -129,4 +129,4 @@ __xla_cpu_runtime_MKLSingleThreadedMatMulF64(const void* run_options_ptr,
   // Set thread number back to the previous number.
   mkl_set_num_threads_local(prev_num_threads);
 }
-#endif  // INTEL_MKL
+#endif  // ENABLE_MKL

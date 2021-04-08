@@ -86,8 +86,27 @@ tf_export(
         "saved_model.constants.SAVED_MODEL_FILENAME_PBTXT"
     ]).export_constant(__name__, "SAVED_MODEL_FILENAME_PBTXT")
 
+# Subdirectory where debugging related files are written.
+DEBUG_DIRECTORY = "debug"
+tf_export(
+    "saved_model.DEBUG_DIRECTORY",
+    v1=[
+        "saved_model.DEBUG_DIRECTORY",
+        "saved_model.constants.DEBUG_DIRECTORY",
+    ]).export_constant(__name__, "DEBUG_DIRECTORY")
+
+# File name for GraphDebugInfo protocol buffer which corresponds to the
+# SavedModel.
+DEBUG_INFO_FILENAME_PB = "saved_model_debug_info.pb"
+tf_export(
+    "saved_model.DEBUG_INFO_FILENAME_PB",
+    v1=[
+        "saved_model.DEBUG_INFO_FILENAME_PB",
+        "saved_model.constants.DEBUG_INFO_FILENAME_PB"
+    ]).export_constant(__name__, "DEBUG_INFO_FILENAME_PB")
+
 # File name for json format of SavedModel.
-# Not exported while keras_saved_model is in contrib.
+# TODO(kathywu): Delete when third_party/keras has copied in this constant
 SAVED_MODEL_FILENAME_JSON = "saved_model.json"
 
 # Subdirectory name containing the variables/checkpoint files.

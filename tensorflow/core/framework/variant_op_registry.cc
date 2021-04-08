@@ -26,17 +26,30 @@ limitations under the License.
 
 namespace tensorflow {
 
+const char* VariantUnaryOpToString(VariantUnaryOp op) {
+  switch (op) {
+    case INVALID_VARIANT_UNARY_OP:
+      return "INVALID";
+    case ZEROS_LIKE_VARIANT_UNARY_OP:
+      return "ZEROS_LIKE";
+    case CONJ_VARIANT_UNARY_OP:
+      return "CONJ";
+  }
+}
+
+const char* VariantBinaryOpToString(VariantBinaryOp op) {
+  switch (op) {
+    case INVALID_VARIANT_BINARY_OP:
+      return "INVALID";
+    case ADD_VARIANT_BINARY_OP:
+      return "ADD";
+  }
+}
+
 std::unordered_set<string>* UnaryVariantOpRegistry::PersistentStringStorage() {
   static std::unordered_set<string>* string_storage =
       new std::unordered_set<string>();
   return string_storage;
-}
-
-// static
-UnaryVariantOpRegistry* UnaryVariantOpRegistry::Global() {
-  static UnaryVariantOpRegistry* global_unary_variant_op_registry =
-      new UnaryVariantOpRegistry;
-  return global_unary_variant_op_registry;
 }
 
 UnaryVariantOpRegistry::VariantDecodeFn* UnaryVariantOpRegistry::GetDecodeFn(
@@ -102,28 +115,6 @@ REGISTER_VARIANT_DECODE_TYPE(double);
 
 #undef REGISTER_VARIANT_DECODE_TYPE
 
-UnaryVariantOpRegistry::AsyncVariantDeviceCopyFn*
-UnaryVariantOpRegistry::GetDeviceCopyFn(
-    const VariantDeviceCopyDirection direction, const TypeIndex& type_index) {
-  auto found = device_copy_fns.find(std::make_pair(direction, type_index));
-  if (found == device_copy_fns.end()) return nullptr;
-  return &found->second;
-}
-
-void UnaryVariantOpRegistry::RegisterDeviceCopyFn(
-    const VariantDeviceCopyDirection direction, const TypeIndex& type_index,
-    const AsyncVariantDeviceCopyFn& device_copy_fn) {
-  AsyncVariantDeviceCopyFn* existing = GetDeviceCopyFn(direction, type_index);
-  CHECK_EQ(existing, nullptr)
-      << "UnaryVariantDeviceCopy for direction: " << direction
-      << " and type_index: " << port::MaybeAbiDemangle(type_index.name())
-      << " already registered";
-  device_copy_fns.insert(
-      std::pair<std::pair<VariantDeviceCopyDirection, TypeIndex>,
-                AsyncVariantDeviceCopyFn>(std::make_pair(direction, type_index),
-                                          device_copy_fn));
-}
-
 Status VariantDeviceCopy(
     const VariantDeviceCopyDirection direction, const Variant& from,
     Variant* to,
@@ -171,26 +162,6 @@ REGISTER_VARIANT_DEVICE_COPY_TYPE(bool);
 
 #undef REGISTER_VARIANT_DEVICE_COPY_TYPE
 
-// Special casing UnaryOpFn per op and per device.
-UnaryVariantOpRegistry::VariantUnaryOpFn* UnaryVariantOpRegistry::GetUnaryOpFn(
-    VariantUnaryOp op, StringPiece device, const TypeIndex& type_index) {
-  auto found = unary_op_fns.find({op, device, type_index});
-  if (found == unary_op_fns.end()) return nullptr;
-  return &found->second;
-}
-
-void UnaryVariantOpRegistry::RegisterUnaryOpFn(
-    VariantUnaryOp op, const string& device, const TypeIndex& type_index,
-    const VariantUnaryOpFn& unary_op_fn) {
-  VariantUnaryOpFn* existing = GetUnaryOpFn(op, device, type_index);
-  CHECK_EQ(existing, nullptr)
-      << "Unary VariantUnaryOpFn for type_index: "
-      << port::MaybeAbiDemangle(type_index.name())
-      << " already registered for device type: " << device;
-  unary_op_fns.insert(std::pair<FuncTuple<VariantUnaryOp>, VariantUnaryOpFn>(
-      {op, GetPersistentStringPiece(device), type_index}, unary_op_fn));
-}
-
 namespace {
 template <typename T>
 Status ZerosLikeVariantPrimitiveType(OpKernelContext* ctx, const T& t,
@@ -212,27 +183,6 @@ REGISTER_VARIANT_ZEROS_LIKE_TYPE(double);
 REGISTER_VARIANT_ZEROS_LIKE_TYPE(bool);
 
 #undef REGISTER_VARIANT_ZEROS_LIKE_TYPE
-
-// Special casing BinaryOpFn per op and per device.
-UnaryVariantOpRegistry::VariantBinaryOpFn*
-UnaryVariantOpRegistry::GetBinaryOpFn(VariantBinaryOp op, StringPiece device,
-                                      const TypeIndex& type_index) {
-  auto found = binary_op_fns.find({op, device, type_index});
-  if (found == binary_op_fns.end()) return nullptr;
-  return &found->second;
-}
-
-void UnaryVariantOpRegistry::RegisterBinaryOpFn(
-    VariantBinaryOp op, const string& device, const TypeIndex& type_index,
-    const VariantBinaryOpFn& add_fn) {
-  VariantBinaryOpFn* existing = GetBinaryOpFn(op, device, type_index);
-  CHECK_EQ(existing, nullptr)
-      << "Unary VariantBinaryOpFn for type_index: "
-      << port::MaybeAbiDemangle(type_index.name())
-      << " already registered for device type: " << device;
-  binary_op_fns.insert(std::pair<FuncTuple<VariantBinaryOp>, VariantBinaryOpFn>(
-      {op, GetPersistentStringPiece(device), type_index}, add_fn));
-}
 
 namespace {
 template <typename T>

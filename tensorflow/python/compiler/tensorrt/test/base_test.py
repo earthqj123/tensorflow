@@ -94,6 +94,8 @@ class SimpleMultiEnginesTest(trt_test.TfTrtIntegrationTestBase):
     q = math_ops.div(conv, c2, name="div")
 
     edge = self.trt_incompatible_op(q, name="incompatible")
+    one = constant_op.constant(1, name="one", dtype=dtype)
+    edge = math_ops.sub(one, edge, name="one_sub")
     edge = math_ops.div(edge, edge, name="div1")
     r = math_ops.add(edge, edge, name="add")
 
@@ -112,19 +114,17 @@ class SimpleMultiEnginesTest(trt_test.TfTrtIntegrationTestBase):
     """Return the expected engines to build."""
     return {
         "TRTEngineOp_0": [
-            "add", "add1", "c1", "div1", "mul", "mul1", "sub", "sub1"
+            "add", "add1", "c1", "div1", "mul", "mul1", "sub", "sub1", "one",
+            "one_sub"
         ],
         "TRTEngineOp_1": ["c2", "conv", "div", "weights"]
     }
 
-  def GetConversionParams(self, run_params):
-    """Return a ConversionParams for test."""
-    return super(
-        SimpleMultiEnginesTest, self
-    ).GetConversionParams(run_params)._replace(
-        # Disable layout optimizer, since it'll add Transpose(Const, Const) to
-        # the graph and breaks the conversion check.
-        rewriter_config_template=trt_test.OptimizerDisabledRewriterConfig())
+  def setUp(self):
+    super(trt_test.TfTrtIntegrationTestBase, self).setUp()
+    # Disable layout optimizer, since it will convert BiasAdd with NHWC
+    # format to NCHW format under four dimentional input.
+    self.DisableNonTrtOptimizers()
 
 
 class SimpleMultiEnginesTest2(trt_test.TfTrtIntegrationTestBase):
@@ -162,9 +162,10 @@ class SimpleMultiEnginesTest2(trt_test.TfTrtIntegrationTestBase):
     """Whether to run the test."""
     # Disable the test in fp16 mode since multiple matmul and add ops together
     # can cause overflow.
-    return ((run_params.precision_mode != "FP16") and
-            not (trt_test.IsQuantizationMode(run_params.precision_mode) and
-                 not run_params.use_calibration))
+    return (
+        (run_params.precision_mode != "FP16") and
+        not (trt_test.IsQuantizationMode(run_params.precision_mode) and
+             not run_params.use_calibration)), "test FP32 and non-calibration"
 
 
 class ConstInputTest(trt_test.TfTrtIntegrationTestBase):

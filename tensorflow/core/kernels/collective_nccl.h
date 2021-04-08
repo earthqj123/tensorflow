@@ -18,7 +18,7 @@ limitations under the License.
 #include "tensorflow/core/framework/collective.h"
 
 namespace tensorflow {
-#ifdef GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 class NcclBase : public CollectiveImplementationInterface {
  public:
@@ -29,22 +29,21 @@ class NcclBase : public CollectiveImplementationInterface {
   Status InitializeCollectiveParams(CollectiveParams* col_params) override;
 
   // Initializes the device objects and device localities.
-  Status InitializeCollectiveContext(CollectiveContext* col_ctx) override;
+  Status InitializeCollectiveContext(
+      std::shared_ptr<CollectiveContext> col_ctx) override;
 
   // Initialize nccl communicator key.
   Status InitializeCollectiveGroupRuntimeDetails(
       CollGroupRuntimeDetails* col_group_runtime_details) override;
 
  protected:
-  const string NcclCollectiveKey(const string& exec_key, int step_id);
-
   const CollectiveType type_;
   const string name_;
-  CollectiveContext* col_ctx_;          // Not owned
+  std::shared_ptr<CollectiveContext> col_ctx_;
   const CollectiveParams* col_params_;  // Not owned
 };
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_CORE_KERNELS_COLLECTIVE_NCCL_H_

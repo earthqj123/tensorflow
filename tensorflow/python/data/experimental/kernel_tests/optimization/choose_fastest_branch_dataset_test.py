@@ -19,23 +19,23 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 
-from tensorflow.python.data.experimental.ops import batching
 from tensorflow.python.data.experimental.ops import optimization
+from tensorflow.python.data.kernel_tests import checkpoint_test_base
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.eager import context
+from tensorflow.python.framework import combinations
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
-from tensorflow.python.framework import test_util
 from tensorflow.python.ops import math_ops
 from tensorflow.python.platform import test
 
 
-@test_util.run_all_in_graph_and_eager_modes
 class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
                                      parameterized.TestCase):
 
+  @combinations.generate(test_base.default_test_combinations())
   def testSimple(self):
     dataset = dataset_ops.Dataset.from_tensor_slices([0, 1, 2, 3, 4])
 
@@ -50,6 +50,7 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
         expected_output=[0, 1, 2, 3, 4],
         expected_shapes=dataset_ops.get_legacy_output_shapes(dataset))
 
+  @combinations.generate(test_base.default_test_combinations())
   def testCaptureSimple(self):
     dataset = dataset_ops.Dataset.range(10)
 
@@ -68,6 +69,7 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
     self.assertDatasetProduces(
         choose_fastest, expected_output=list(range(1, 11)))
 
+  @combinations.generate(test_base.default_test_combinations())
   def testDifferentFunctions(self):
     dataset = dataset_ops.Dataset.range(100)
 
@@ -84,6 +86,7 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
         choose_fastest,
         expected_output=[list(range(10 * x, 10 * x + 10)) for x in range(10)])
 
+  @combinations.generate(test_base.default_test_combinations())
   def testWithRepeatBeforeAndAfter(self):
     dataset = dataset_ops.Dataset.from_tensors(0).repeat(10)
 
@@ -100,6 +103,7 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
     self.assertDatasetProduces(
         choose_fastest, expected_output=[[0] * 10 for _ in range(10)])
 
+  @combinations.generate(test_base.default_test_combinations())
   def testWithPrefetch(self):
     """Should maintain ordering even if the branches do prefetching."""
     dataset = dataset_ops.Dataset.range(100)
@@ -115,12 +119,13 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
 
     self.assertDatasetProduces(choose_fastest, expected_output=list(range(100)))
 
+  @combinations.generate(test_base.default_test_combinations())
   def testWithMoreOutputThanInput(self):
 
     dataset = dataset_ops.Dataset.from_tensors(0).repeat(1000).batch(100)
 
     def branch(dataset):
-      return dataset.apply(batching.unbatch())
+      return dataset.unbatch()
 
     choose_fastest = optimization._ChooseFastestBranchDataset(
         dataset, [branch, branch],
@@ -129,12 +134,13 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
 
     self.assertDatasetProduces(choose_fastest, expected_output=[0] * 1000)
 
+  @combinations.generate(test_base.default_test_combinations())
   def testWithBadNumElements(self):
 
     dataset = dataset_ops.Dataset.from_tensors(0).repeat(1000).batch(100)
 
     def branch(dataset):
-      return dataset.apply(batching.unbatch())
+      return dataset.unbatch()
 
     def make_dataset():
       return optimization._ChooseFastestBranchDataset(
@@ -145,8 +151,8 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
     expected_error_msg = ("`num_elements_per_branch` must be divisible by "
                           "`ratio_denominator`")
     if context.executing_eagerly():
-      with self.assertRaisesRegexp(errors.InvalidArgumentError,
-                                   expected_error_msg):
+      with self.assertRaisesRegex(errors.InvalidArgumentError,
+                                  expected_error_msg):
         make_dataset()
     else:
       choose_fastest = make_dataset()
@@ -154,6 +160,7 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
           choose_fastest,
           expected_error=(errors.InvalidArgumentError, expected_error_msg))
 
+  @combinations.generate(test_base.default_test_combinations())
   def testErrorWithRepeat(self):
     dataset = dataset_ops.Dataset.from_tensors(0)
 
@@ -170,6 +177,83 @@ class ChooseFastestBranchDatasetTest(test_base.DatasetTestBase,
             errors.InvalidArgumentError,
             "Cannot create more than one WrapperIterator per WrapperDataset."),
         expected_error_iter=2)
+
+
+class ChooseFastestBranchDatasetCheckpointTest(
+    checkpoint_test_base.CheckpointTestBase, parameterized.TestCase):
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testCore(self):
+
+    def build_ds(size):
+      dataset = dataset_ops.Dataset.range(size)
+
+      def branch_0(dataset):
+        return dataset.map(lambda x: x).batch(10)
+
+      def branch_1(dataset):
+        return dataset.batch(10).map(lambda x: x)
+
+      return optimization._ChooseFastestBranchDataset(  # pylint: disable=protected-access
+          dataset, [branch_0, branch_1],
+          ratio_numerator=10)
+
+    for size in [100, 1000]:
+      self.run_core_tests(lambda: build_ds(size), size // 10)  # pylint: disable=cell-var-from-loop
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testWithCapture(self):
+
+    def build_ds():
+      dataset = dataset_ops.Dataset.range(10)
+      const_64 = constant_op.constant(1, dtypes.int64)
+      const_32 = constant_op.constant(1, dtypes.int32)
+
+      def branch_0(dataset):
+        return dataset.map(lambda x: x + const_64)
+
+      def branch_1(dataset):
+        return dataset.map(lambda x: x + math_ops.cast(const_32, dtypes.int64))
+
+      return optimization._ChooseFastestBranchDataset(
+          dataset, [branch_0, branch_1], num_elements_per_branch=3)
+
+    self.run_core_tests(build_ds, 10)
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testWithPrefetch(self):
+
+    def build_ds():
+      dataset = dataset_ops.Dataset.range(10)
+      const_64 = constant_op.constant(1, dtypes.int64)
+      const_32 = constant_op.constant(1, dtypes.int32)
+
+      def branch_0(dataset):
+        return dataset.map(lambda x: x + const_64)
+
+      def branch_1(dataset):
+        return dataset.map(lambda x: x + math_ops.cast(const_32, dtypes.int64))
+
+      return optimization._ChooseFastestBranchDataset(
+          dataset, [branch_0, branch_1], num_elements_per_branch=3)
+
+    self.run_core_tests(build_ds, 10)
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testWithMoreOutputThanInput(self):
+
+    def build_ds():
+      dataset = dataset_ops.Dataset.from_tensors(0).repeat(1000).batch(100)
+
+      def branch(dataset):
+        return dataset.unbatch()
+
+      return optimization._ChooseFastestBranchDataset(
+          dataset, [branch, branch],
+          ratio_denominator=10,
+          num_elements_per_branch=100)
+
+    self.run_core_tests(build_ds, 1000)
 
 
 if __name__ == "__main__":

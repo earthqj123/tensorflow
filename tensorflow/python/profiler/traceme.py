@@ -12,28 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""TraceMe allows the profiler to trace python events.
-
-Usage:
-    with profiler.TraceMe('name'):
-      ...
-"""
+"""TraceMe allows the profiler to trace Python events."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensorflow.python import pywrap_tensorflow
+from tensorflow.python.profiler.trace import Trace as TraceMe
 
 
-class TraceMe(object):
-  """Context manager that generates a trace event in the profiler."""
+def traceme_wrapper(func):
+  name = getattr(func, '__qualname__', None)
+  if not name:
+    name = func.__name__
 
-  def __init__(self, name):
-    self._traceme = pywrap_tensorflow.PythonTraceMe(name)
-
-  def __enter__(self):
-    self._traceme.Enter()
-
-  def __exit__(self, exc_type, exc_val, exc_tb):
-    self._traceme.Exit()
+  def wrapper(*args, **kwargs):
+    with TraceMe(name):
+      return func(*args, **kwargs)
+  return wrapper

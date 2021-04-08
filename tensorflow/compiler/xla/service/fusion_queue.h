@@ -15,29 +15,13 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_FUSION_QUEUE_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_FUSION_QUEUE_H_
 
-#include <utility>
+#include <string>
+#include <vector>
 
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 
 namespace xla {
-
-// Fusion configuration.
-using FusionConfig = std::vector<std::vector<bool>>;
-
-// Converts fusion config to string format.
-static string FusionConfigToString(const FusionConfig& config) {
-  string s = "";
-  for (auto& edge_list : config) {
-    for (auto edge : edge_list) {
-      if (edge) {
-        s += "1";
-      } else {
-        s += "0";
-      }
-    }
-  }
-  return s;
-}
 
 // A queue interface that allows implementations to choose fusion candidates in
 // custom order.
@@ -60,6 +44,11 @@ class FusionQueue {
   virtual void OnFusingInstruction(HloInstruction* fusion,
                                    HloInstruction* original_producer,
                                    HloInstruction* original_consumer) {}
+
+  // A callback passed to the queue implementation when a proposed fusion does
+  // not happen.
+  virtual void NotFusingInstruction(HloInstruction* producer,
+                                    HloInstruction* consumer) {}
 
   // A callback passed to the queue implementation to notify the removal of an
   // instruction.

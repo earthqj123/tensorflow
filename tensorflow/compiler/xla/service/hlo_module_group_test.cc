@@ -18,7 +18,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo.pb.h"
 #include "tensorflow/compiler/xla/service/hlo_matchers.h"
 #include "tensorflow/compiler/xla/service/hlo_module_group_metadata.h"
-#include "tensorflow/compiler/xla/service/hlo_parser.h"
 #include "tensorflow/compiler/xla/test.h"
 #include "tensorflow/compiler/xla/tests/hlo_test_base.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -28,6 +27,8 @@ namespace xla {
 namespace {
 
 namespace op = ::xla::testing::opcode_matchers;
+using ::testing::Property;
+using ::testing::StrEq;
 
 class HloModuleGroupTest : public HloTestBase {
  protected:
@@ -45,7 +46,7 @@ ENTRY %entry (x: f32[], y: f32[]) -> f32[] {
 }
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnUnverifiedModule(text));
+                          ParseAndReturnVerifiedModule(text));
   HloModuleGroup group(std::move(module));
 
   EXPECT_EQ(group.modules().size(), 1);
@@ -84,9 +85,9 @@ ENTRY %entry (a: f32[]) -> f32[] {
 }
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module_0,
-                          ParseAndReturnUnverifiedModule(text_0));
+                          ParseAndReturnVerifiedModule(text_0));
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module_1,
-                          ParseAndReturnUnverifiedModule(text_1));
+                          ParseAndReturnVerifiedModule(text_1));
   std::vector<std::unique_ptr<HloModule>> modules;
   modules.push_back(std::move(module_0));
   modules.push_back(std::move(module_1));
@@ -123,9 +124,9 @@ ENTRY %entry (a: f32[]) -> f32[] {
 }
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module_0,
-                          ParseAndReturnUnverifiedModule(text_0));
+                          ParseAndReturnVerifiedModule(text_0));
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module_1,
-                          ParseAndReturnUnverifiedModule(text_1));
+                          ParseAndReturnVerifiedModule(text_1));
   HloModuleGroup group(TestName());
   group.push_back(std::move(module_0));
   group.push_back(std::move(module_1));
@@ -179,7 +180,7 @@ ENTRY entry {
       const int64 send_channel = i;
       const int64 recv_channel = i == 0 ? kDeviceCount - 1 : i - 1;
       TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                              ParseAndReturnUnverifiedModule(absl::StrFormat(
+                              ParseAndReturnVerifiedModule(absl::StrFormat(
                                   text, i, send_channel, send_channel,
                                   recv_channel, recv_channel)));
       group.push_back(std::move(module));
@@ -201,6 +202,31 @@ ENTRY entry {
       EXPECT_TRUE(absl::c_equal(companion_order, module_ids));
     }
   }
+}
+
+// Test that metadata is transferred when a module is replaced.
+TEST_F(HloModuleGroupTest, ReplaceModuleMetadata) {
+  auto old_module = CreateNewVerifiedModule();
+  int old_module_id = old_module->unique_id();
+  old_module->metadata()->RecordPassStart();
+  TF_EXPECT_OK(old_module->metadata()->set_current_pass_name("fake pass"));
+
+  HloModuleGroup group(std::move(old_module));
+  EXPECT_EQ(group.module(0).metadata()->proto().module_group_name(),
+            group.name());
+
+  auto new_module = CreateNewVerifiedModule();
+  group.ReplaceModule(0, std::move(new_module));
+
+  EXPECT_NE(group.module(0).unique_id(), old_module_id);
+  const HloModuleMetadataProto& module_metadata =
+      group.module(0).metadata()->proto();
+  EXPECT_EQ(module_metadata.canonical_module_id(), old_module_id);
+
+  const HloPassMetadata& pass_metadata =
+      *module_metadata.pass_metadata().rbegin();
+  EXPECT_THAT(pass_metadata,
+              Property(&HloPassMetadata::pass_name, StrEq("fake pass")));
 }
 
 }  // namespace

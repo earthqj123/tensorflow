@@ -19,7 +19,9 @@ limitations under the License.
 #include <memory>
 
 #include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
+#include "tensorflow/compiler/xla/service/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/hlo_matchers.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
 #include "tensorflow/compiler/xla/service/instruction_fusion.h"
@@ -49,7 +51,7 @@ class TuplePointsToAnalysisTest : public HloTestBase {
   }
 
   void BuildModule(std::unique_ptr<HloComputation> computation) {
-    module_ = CreateNewUnverifiedModule();
+    module_ = CreateNewVerifiedModule();
     module_->AddEntryComputation(std::move(computation));
   }
 
@@ -333,10 +335,10 @@ TEST_F(TuplePointsToAnalysisTest, CopyStartAndCopyDone) {
   auto builder = HloComputation::Builder(TestName());
   auto constant = builder.AddInstruction(
       HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(1.0)));
-  auto copy_start = builder.AddInstruction(HloInstruction::CreateUnary(
-      ShapeUtil::MakeTupleShape(
-          {constant->shape(), ShapeUtil::MakeShape(U32, {})}),
-      HloOpcode::kCopyStart, constant));
+  auto copy_start = builder.AddInstruction(HloInstruction::CreateCopyStart(
+      ShapeUtil::MakeTupleShape({constant->shape(), constant->shape(),
+                                 ShapeUtil::MakeShape(U32, {})}),
+      constant));
   auto copy_done = builder.AddInstruction(HloInstruction::CreateUnary(
       constant->shape(), HloOpcode::kCopyDone, copy_start));
 
@@ -351,6 +353,7 @@ TEST_F(TuplePointsToAnalysisTest, CopyStartAndCopyDone) {
       points_to_analysis_->GetPointsToSet(copy_start).element({}),
       {copy_start});
   ExpectHasBufferAliases(copy_start, {0}, {{copy_start, {0}}, {copy_done, {}}});
+  ExpectHasBufferAliases(constant, {}, {{constant, {}}, {copy_start, {1}}});
 }
 
 TEST_F(TuplePointsToAnalysisTest, SendAndSendDone) {
@@ -595,7 +598,7 @@ TEST_F(TuplePointsToAnalysisTest, TupleWithBitcast) {
 
 TEST_F(TuplePointsToAnalysisTest, PointsToTupleConstantElements) {
   // Construct a tuple constant and kCopy it. Verify the points-to set of the
-  // copy correctly correctly points into the nested elements of the constant.
+  // copy correctly points into the nested elements of the constant.
   auto builder = HloComputation::Builder(TestName());
   Literal elements[] = {LiteralUtil::CreateR2<float>({{1.0}, {2.0}}),
                         LiteralUtil::CreateR1<float>({2.0, 42})};
@@ -641,6 +644,29 @@ TEST_F(TuplePointsToAnalysisTest, BufferAliases) {
   ExpectHasBufferAliases(tuple, /*index=*/{}, {{tuple, {}}});
 }
 
+TEST_F(TuplePointsToAnalysisTest, CustomCall) {
+  auto builder = HloComputation::Builder(TestName());
+  auto constant = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(1.0)));
+  Shape data_shape = ShapeUtil::MakeShape(F32, {});
+  auto ccall = builder.AddInstruction(HloInstruction::CreateCustomCall(
+      ShapeUtil::MakeTupleShape({data_shape, data_shape}), {constant},
+      "TestOp"));
+  Cast<HloCustomCallInstruction>(ccall)->set_output_to_operand_aliasing(
+      {std::pair<ShapeIndex, std::pair<int64, ShapeIndex>>{
+          ShapeIndex{1}, std::pair<int64, ShapeIndex>(0, {})}});
+  auto gte0 = builder.AddInstruction(
+      HloInstruction::CreateGetTupleElement(data_shape, ccall, 0));
+  auto gte1 = builder.AddInstruction(
+      HloInstruction::CreateGetTupleElement(data_shape, ccall, 1));
+
+  BuildModuleAndRunAnalysis(builder.Build());
+
+  ExpectHasBufferAliases(ccall, /*index=*/{0}, {{gte0, {}}, {ccall, {0}}});
+  ExpectHasBufferAliases(constant, /*index=*/{},
+                         {{constant, {}}, {gte1, {}}, {ccall, {1}}});
+}
+
 class FusionPointsToAnalysisTest : public TuplePointsToAnalysisTest {
  protected:
   // Builds a computation, runs instruction fusion HloPass, runs points-to
@@ -661,7 +687,7 @@ class FusionPointsToAnalysisTest : public TuplePointsToAnalysisTest {
     auto tuple_element1 = builder.AddInstruction(
         HloInstruction::CreateGetTupleElement(update_shape, tuple_param0, 1));
     auto ones = builder.AddInstruction(HloInstruction::CreateConstant(
-        LiteralUtil::CreateR1<float>({1.f, 1.f, 1.f, 1.f})));
+        LiteralUtil::CreateR1<float>({1.f, 1.f, 1.f})));
     // Create 'update' = Add(GetTupleElement(tuple_param0, 1), ones)
     auto update = builder.AddInstruction(HloInstruction::CreateBinary(
         update_shape, HloOpcode::kAdd, tuple_element1, ones));
@@ -850,7 +876,7 @@ TEST_F(FusionPointsToAnalysisTest, FusionParam0TwoUsers) {
 class PointsToAnalysisTestBase : public HloTestBase {
  protected:
   void BuildModule(std::unique_ptr<HloComputation> computation) {
-    module_ = CreateNewUnverifiedModule();
+    module_ = CreateNewVerifiedModule();
     computation_ = module_->AddEntryComputation(std::move(computation));
   }
 

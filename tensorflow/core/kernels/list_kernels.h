@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensorflow/core/framework/variant_op_registry.h"
 #include "tensorflow/core/kernels/concat_lib.h"
 #include "tensorflow/core/kernels/fill_functor.h"
+#include "tensorflow/core/kernels/tensor_list.h"
 #include "tensorflow/core/lib/core/coding.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/refcount.h"
@@ -40,137 +41,6 @@ limitations under the License.
 namespace tensorflow {
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
-
-// Variant compatible type for a list of tensors. This is mutable but instances
-// should never be mutated after stored in a variant tensor.
-//
-// **NOTE**: TensorList stores a refcounted container of tf::Tensor objects,
-// which are accessible via TensorList::tensors().  Because it is refcounted,
-// straight copies of the form:
-//
-//    TensorList b = a;
-//    b.tensors().push_back(t);  // WARNING: This modifies a.tensors().
-//
-// Do not create a true copy of the underlying container - but instead increment
-// a reference count.  Modifying b.tensors() modifies a.tensors().  In this way,
-// TensorList should be considered similar to the tf::Tensor object.
-//
-// In order to get a copy of the underlying list, use the Copy method:
-//
-//    TensorList b = a.Copy();
-//    b.tensors().push_back(t);  // This does not modify a.tensors().
-//
-// Note that this is not a deep copy: the memory locations of the underlying
-// tensors will still point to the same locations of the corresponding tensors
-// in the original.  To truly perform a deep copy, Device and Type-specific
-// code needs to be applied to the underlying tensors as usual.
-//
-// The most important implication of RefCounted TLs is that OpKernels
-// wishing to reuse TensorList inputs as outputs via context->forward_input()
-// need to perform an additional check on the refcount of the TensorList,
-// to ensure aliasing can be performed safely.  For example:
-//
-//     bool can_alias = false;
-//     auto fw = c->forward_input(..., DT_VARIANT, {}, ...);
-//     if (fw && fw->dtype() == DT_VARIANT && fw->NumElements() == 1) {
-//       auto* tl = fw->scalar<Variant>()().get<TensorList>();
-//       if (tl && tl->RefCountIsOne()) {
-//         can_alias = true;
-//       }
-//     }
-//
-class TensorList {
- public:
-  TensorList() : tensors_(new Tensors) {}
-  ~TensorList();
-
-  TensorList(const TensorList& other)
-      : element_shape(other.element_shape),
-        element_dtype(other.element_dtype),
-        max_num_elements(other.max_num_elements),
-        tensors_(other.tensors_) {
-    tensors_->Ref();
-  }
-
-  TensorList(TensorList&& rhs)
-      : element_shape(std::move(rhs.element_shape)),
-        element_dtype(rhs.element_dtype),
-        max_num_elements(rhs.max_num_elements),
-        tensors_(rhs.tensors_) {
-    rhs.tensors_ = nullptr;
-  }
-
-  TensorList& operator=(const TensorList& rhs) {
-    if (this == &rhs) return *this;
-    element_shape = rhs.element_shape;
-    element_dtype = rhs.element_dtype;
-    max_num_elements = rhs.max_num_elements;
-    tensors_->Unref();
-    tensors_ = rhs.tensors_;
-    tensors_->Ref();
-    return *this;
-  }
-
-  TensorList& operator=(TensorList&& rhs) {
-    if (this == &rhs) return *this;
-    element_shape = rhs.element_shape;
-    element_dtype = rhs.element_dtype;
-    max_num_elements = rhs.max_num_elements;
-    std::swap(tensors_, rhs.tensors_);
-    return *this;
-  }
-
-  static const char kTypeName[];
-
-  string TypeName() const { return kTypeName; }
-
-  void Encode(VariantTensorData* data) const;
-
-  bool Decode(const VariantTensorData& data);
-
-  // TODO(apassos) fill this out
-  string DebugString() const { return "TensorList"; }
-
-  PartialTensorShape element_shape;
-
-  DataType element_dtype;
-
-  // The maximum allowed size of `tensors`. Defaults to -1 meaning that the size
-  // of `tensors` is unbounded.
-  int max_num_elements = -1;
-
-  // Access to the underlying tensor container.
-  std::vector<Tensor>& tensors() { return tensors_->values_; }
-  const std::vector<Tensor>& tensors() const { return tensors_->values_; }
-
-  // Get a new TensorList containing a copy of the underlying tensor container.
-  TensorList Copy() const {
-    TensorList out;
-    out.element_shape = element_shape;
-    out.element_dtype = element_dtype;
-    out.max_num_elements = max_num_elements;
-    // This performs a copy of the std::vector.
-    out.tensors_->values_ = tensors_->values_;
-    return out;
-  }
-
-  // Is this TensorList the only one with a reference to the underlying
-  // container?
-  bool RefCountIsOne() const { return tensors_->RefCountIsOne(); }
-
- private:
-  class Tensors : public core::RefCounted {
-   public:
-    std::vector<Tensor> values_;
-  };
-  Tensors* tensors_;
-};
-
-#if defined(PLATFORM_GOOGLE)
-// TODO(ebrevdo): Identify why Variant inline size is smaller on mobile devices.
-static_assert(Variant::CanInlineType<TensorList>(),
-              "Must be able to inline TensorList into a Variant");
-#endif
 
 Status TensorShapeFromTensor(const Tensor& t, PartialTensorShape* out);
 
@@ -411,20 +281,17 @@ class TensorListConcat : public OpKernel {
       std::vector<std::unique_ptr<typename TTypes<T, 2>::ConstMatrix>>;
   explicit TensorListConcat(OpKernelConstruction* c) : OpKernel(c) {
     OP_REQUIRES_OK(c, c->GetAttr("element_dtype", &element_dtype_));
-    // TODO(skyewm): the HasAttr check can be removed once the
-    // element_shape_except_first_dim attr has been checked in for 2 weeks
-    // (around 1/14/2019).
     if (c->HasAttr("element_shape")) {
-      PartialTensorShape element_shape;
-      OP_REQUIRES_OK(c, c->GetAttr("element_shape", &element_shape));
-      if (!element_shape.unknown_rank()) {
-        element_shape_except_first_dim_ = PartialTensorShape(
-            gtl::ArraySlice<int64>(element_shape.dim_sizes()).subspan(1));
-      }
+      OP_REQUIRES_OK(c, c->GetAttr("element_shape", &element_shape_));
     }
   }
 
   void Compute(OpKernelContext* c) override {
+    PartialTensorShape element_shape_except_first_dim;
+    if (!element_shape_.unknown_rank()) {
+      element_shape_except_first_dim = PartialTensorShape(
+          gtl::ArraySlice<int64>(element_shape_.dim_sizes()).subspan(1));
+    }
     // Check that the input Variant tensor is indeed a TensorList and has the
     // correct element type.
     const TensorList* tensor_list = nullptr;
@@ -448,21 +315,21 @@ class TensorListConcat : public OpKernel {
                       "Concat requires elements to be at least vectors, ",
                       "found scalars instead."));
       // Split `element_shape` into `first_dim` and
-      // `element_shape_except_first_dim_`.
+      // `element_shape_except_first_dim`.
       first_dim = element_shape.dim_size(0);
-      element_shape_except_first_dim_ = element_shape;
-      element_shape_except_first_dim_.RemoveDim(0);
+      element_shape_except_first_dim = element_shape;
+      element_shape_except_first_dim.RemoveDim(0);
     }
-    // If the TensorList is empty, element_shape_except_first_dim_ must be fully
+    // If the TensorList is empty, element_shape_except_first_dim must be fully
     // defined.
     OP_REQUIRES(c,
                 !tensor_list->tensors().empty() ||
-                    element_shape_except_first_dim_.IsFullyDefined(),
+                    element_shape_except_first_dim.IsFullyDefined(),
                 errors::InvalidArgument(
                     "All except the first dimension must be fully defined ",
                     "when concating an empty tensor list. element_shape: ",
-                    element_shape_except_first_dim_.DebugString()));
-    // 1. Check that `element_shape_except_first_dim_` input tensor is
+                    element_shape_except_first_dim.DebugString()));
+    // 1. Check that `element_shape_except_first_dim` input tensor is
     //    compatible with the shapes of element tensors.
     // 2. Check that the elements have the same shape except the first dim.
     // 3. If `first_dim` is known, check that it is compatible with the leading
@@ -476,7 +343,7 @@ class TensorListConcat : public OpKernel {
       for (int i = 0; i < tensor_list->tensors().size(); ++i) {
         const Tensor& t = tensor_list->tensors()[i];
         if (t.dtype() != DT_INVALID) {
-          PartialTensorShape tmp = element_shape_except_first_dim_;
+          PartialTensorShape tmp = element_shape_except_first_dim;
           OP_REQUIRES(
               c, TensorShapeUtils::IsVectorOrHigher(t.shape()),
               errors::InvalidArgument("Concat saw a scalar shape at index ", i,
@@ -484,7 +351,7 @@ class TensorListConcat : public OpKernel {
           TensorShape shape_except_first_dim = TensorShape(
               gtl::ArraySlice<int64>(t.shape().dim_sizes()).subspan(1));
           OP_REQUIRES_OK(c, tmp.MergeWith(shape_except_first_dim,
-                                          &element_shape_except_first_dim_));
+                                          &element_shape_except_first_dim));
           OP_REQUIRES(c, first_dim == -1 || first_dim == t.shape().dim_size(0),
                       errors::InvalidArgument(
                           "First entry of element_shape input does not match ",
@@ -504,12 +371,11 @@ class TensorListConcat : public OpKernel {
       first_dim = inferred_first_dim;
     }
     TensorShape output_shape;
-    OP_REQUIRES(
-        c, element_shape_except_first_dim_.AsTensorShape(&output_shape),
-        errors::InvalidArgument(
-            "Trying to concat list with only uninitialized tensors ",
-            "but element_shape_except_first_dim_ is not fully defined: ",
-            element_shape_except_first_dim_.DebugString()));
+    OP_REQUIRES(c, element_shape_except_first_dim.AsTensorShape(&output_shape),
+                errors::InvalidArgument(
+                    "Trying to concat list with only uninitialized tensors ",
+                    "but element_shape_except_first_dim is not fully defined: ",
+                    element_shape_except_first_dim.DebugString()));
     // Build the lengths_tensor and leading dim of the output tensor by
     // iterating over all element tensors.
     Tensor* lengths_tensor = nullptr;
@@ -565,8 +431,10 @@ class TensorListConcat : public OpKernel {
     for (int i = 0; i < tensor_list->tensors().size(); i++) {
       const Tensor& element_tensor = tensor_list->tensors()[i];
       if (element_tensor.dtype() != DT_INVALID) {
-        inputs_flat.emplace_back(new typename TTypes<T, 2>::ConstMatrix(
-            element_tensor.shaped<T, 2>({1, element_tensor.NumElements()})));
+        if (element_tensor.NumElements() > 0) {
+          inputs_flat.emplace_back(new typename TTypes<T, 2>::ConstMatrix(
+              element_tensor.shaped<T, 2>({1, element_tensor.NumElements()})));
+        }
       } else {
         AllocatorAttributes attr;
         if (element_dtype_ == DT_VARIANT) {
@@ -598,7 +466,7 @@ class TensorListConcat : public OpKernel {
 
  private:
   DataType element_dtype_;
-  PartialTensorShape element_shape_except_first_dim_;
+  PartialTensorShape element_shape_;
 };
 
 template <typename Device, typename T>

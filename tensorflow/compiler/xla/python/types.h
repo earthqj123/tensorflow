@@ -19,10 +19,12 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "absl/container/inlined_vector.h"
 #include "absl/types/optional.h"
-#include "include/pybind11/numpy.h"
-#include "include/pybind11/pybind11.h"
-#include "include/pybind11/stl.h"
+#include "pybind11/numpy.h"
+#include "pybind11/pybind11.h"
+#include "pybind11/stl.h"
+#include "tensorflow/compiler/xla/python/absl_casters.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/shape.h"
 #include "tensorflow/compiler/xla/status.h"
@@ -49,6 +51,39 @@ StatusOr<PrimitiveType> DtypeToPrimitiveType(const pybind11::dtype& np_type);
 // Converts a PrimitiveType to a Numpy dtype.
 StatusOr<pybind11::dtype> PrimitiveTypeToDtype(PrimitiveType type);
 
+// Returns a numpy-style format descriptor string for `type`.
+StatusOr<std::string> FormatDescriptorForPrimitiveType(PrimitiveType type);
+
+// Returns a numpy-style typestr for `type`, as returned by np.dtype(...).str
+StatusOr<pybind11::str> TypeDescriptorForPrimitiveType(PrimitiveType type);
+
+struct NumpyScalarTypes {
+  pybind11::object np_bool;
+  pybind11::object np_int8;
+  pybind11::object np_int16;
+  pybind11::object np_int32;
+  pybind11::object np_int64;
+  pybind11::object np_uint8;
+  pybind11::object np_uint16;
+  pybind11::object np_uint32;
+  pybind11::object np_uint64;
+  pybind11::object np_bfloat16;
+  pybind11::object np_float16;
+  pybind11::object np_float32;
+  pybind11::object np_float64;
+  pybind11::object np_complex64;
+  pybind11::object np_complex128;
+  pybind11::object np_longlong;
+  pybind11::object np_intc;
+};
+const NumpyScalarTypes& GetNumpyScalarTypes();
+
+// For S64/U64/F64/C128 types, returns the largest 32-bit equivalent.
+PrimitiveType Squash64BitTypes(PrimitiveType type);
+
+// Returns the strides for `shape`.
+std::vector<ssize_t> ByteStridesForShape(const Shape& shape);
+
 // Converts a literal to (possibly-nested tuples of) NumPy arrays.
 // The literal's leaf arrays are not copied; instead the NumPy arrays share
 // buffers with the literals. Takes ownership of `literal` and keeps the
@@ -70,13 +105,24 @@ struct PythonBufferTree {
 StatusOr<PythonBufferTree> GetPythonBufferTree(
     const pybind11::object& argument);
 
-// Converts a sequence of int64s to a Python tuple of ints.
-// Pybind11 by default converts a std::vector<int64> to a Python list; for
-// shapes we frequently want a tuple instead.
+// Converts a sequence of C++ ints to a Python tuple of ints.
+// Pybind11 by default converts a std::vector<int64> to a Python list;
+// we frequently want a tuple instead e.g. for shapes.
 pybind11::tuple IntSpanToTuple(absl::Span<int64 const> xs);
+pybind11::tuple IntSpanToTuple(absl::Span<int const> xs);
 
 // Converts a Python sequence of integers to a std::vector<int64>
 std::vector<int64> IntSequenceToVector(const pybind11::object& sequence);
+
+// Private helper function used in the implementation of the type caster for
+// xla::BorrowingLiteral. Converts a Python array-like object into a buffer
+// pointer and shape.
+struct CastToArrayResult {
+  pybind11::object array;  // Holds a reference to the array to keep it alive.
+  const char* buf_ptr;
+  xla::Shape shape;
+};
+absl::optional<CastToArrayResult> CastToArray(pybind11::handle h);
 
 }  // namespace xla
 
@@ -86,48 +132,6 @@ std::vector<int64> IntSequenceToVector(const pybind11::object& sequence);
 // the exceptions are local to the binding code.
 namespace pybind11 {
 namespace detail {
-
-// When absl::optional is an alias for std::optional, the type_caster
-// specializations are provided by pybind11.
-#ifndef ABSL_HAVE_STD_OPTIONAL
-// absl::optional
-template <typename T>
-struct type_caster<absl::optional<T>> : optional_caster<absl::optional<T>> {};
-
-template <>
-struct type_caster<absl::nullopt_t> : public void_caster<absl::nullopt_t> {};
-#endif
-
-// absl::Span
-template <typename T>
-struct type_caster<absl::Span<const T>> {
-  using value_conv = make_caster<T>;
-
-  PYBIND11_TYPE_CASTER(absl::Span<const T>,
-                       _("Span[") + value_conv::name + _("]"));
-
-  // absl::Span doesn't hold ownership. We therefore need a temporary array.
-  // Pybind appears to keep type_casters alive until the callee has run.
-  std::vector<T> storage_;
-
-  bool load(handle src, bool convert) {
-    if (!isinstance<sequence>(src)) {
-      return false;
-    }
-    auto seq = reinterpret_borrow<sequence>(src);
-    storage_.clear();
-    storage_.reserve(seq.size());
-    for (auto it : seq) {
-      value_conv conv;
-      if (!conv.load(it, convert)) {
-        return false;
-      }
-      storage_.push_back(cast_op<T&&>(std::move(conv)));
-    }
-    value = absl::Span<const T>(storage_);
-    return true;
-  }
-};
 
 // Status, StatusOr. Failing statuses become Python exceptions; Status::OK()
 // becomes None.
@@ -175,32 +179,38 @@ struct type_caster<xla::BorrowingLiteral> {
   PYBIND11_TYPE_CASTER(xla::BorrowingLiteral, _("xla::BorrowingLiteral"));
 
   // Pybind appears to keep type_casters alive until the callee has run.
-  pybind11::array array;
+  absl::InlinedVector<pybind11::array, 1> arrays;
 
-  bool load(handle handle, bool) {
-    array = pybind11::array::ensure(
-        handle, pybind11::array::c_style |
-                    pybind11::detail::npy_api::NPY_ARRAY_ALIGNED_);
-    if (!array) return false;
-    pybind11::buffer_info buffer_info = array.request();
-
-    absl::InlinedVector<xla::int64, 4> dims(array.ndim());
-    for (int i = 0; i < array.ndim(); ++i) {
-      dims[i] = array.shape(i);
+  bool load(handle input, bool) {
+    // TODO(b/79707221): support nested tuples if/when XLA adds support for
+    // nested BorrowingLiterals.
+    if (pybind11::isinstance<pybind11::tuple>(input)) {
+      pybind11::tuple tuple =
+          pybind11::reinterpret_borrow<pybind11::tuple>(input);
+      std::vector<xla::Shape> shapes;
+      std::vector<const char*> buffers;
+      arrays.reserve(tuple.size());
+      shapes.reserve(tuple.size());
+      buffers.reserve(tuple.size());
+      for (pybind11::handle entry : tuple) {
+        auto c = xla::CastToArray(entry);
+        if (!c) {
+          return false;
+        }
+        arrays.push_back(c->array);
+        buffers.push_back(c->buf_ptr);
+        shapes.push_back(c->shape);
+      }
+      value = xla::BorrowingLiteral(buffers,
+                                    xla::ShapeUtil::MakeTupleShape(shapes));
+    } else {
+      auto c = xla::CastToArray(input);
+      if (!c) {
+        return false;
+      }
+      arrays.push_back(c->array);
+      value = xla::BorrowingLiteral(c->buf_ptr, c->shape);
     }
-    auto type = xla::DtypeToPrimitiveType(array.dtype());
-    if (!type.ok()) {
-      throw std::runtime_error(type.status().ToString());
-    }
-    xla::Shape shape = xla::ShapeUtil::MakeShape(type.ValueOrDie(), dims);
-    if (buffer_info.size * buffer_info.itemsize !=
-        xla::ShapeUtil::ByteSizeOf(shape)) {
-      throw std::runtime_error(absl::StrCat(
-          "Size mismatch for buffer: ", buffer_info.size * buffer_info.itemsize,
-          " vs. ", xla::ShapeUtil::ByteSizeOf(shape)));
-    }
-    value =
-        xla::BorrowingLiteral(static_cast<const char*>(buffer_info.ptr), shape);
     return true;
   }
 };
@@ -384,7 +394,7 @@ struct type_caster<xla::PaddingConfig> {
     sequence dimensions =
         reinterpret_borrow<sequence>(getattr(handle, "dimensions"));
 
-    for (auto dimension : dimensions) {
+    for (const auto& dimension : dimensions) {
       xla::PaddingConfig::PaddingConfigDimension* config_dim =
           value.add_dimensions();
       config_dim->set_edge_padding_low(
@@ -439,10 +449,80 @@ struct type_caster<xla::PrecisionConfig> {
     sequence operand_precisions =
         reinterpret_borrow<sequence>(getattr(handle, "operand_precision"));
 
-    for (auto operand_precision : operand_precisions) {
+    for (const auto& operand_precision : operand_precisions) {
       value.add_operand_precision(
           operand_precision.cast<xla::PrecisionConfig::Precision>());
     }
+    return true;
+  }
+};
+
+template <>
+struct type_caster<xla::OpSharding> {
+ public:
+  PYBIND11_TYPE_CASTER(xla::OpSharding, _("xla::OpSharding"));
+
+  // PyObject -> C++ conversion.
+  bool load(handle handle_obj, bool) {
+    if (handle_obj.is_none()) {
+      return true;
+    }
+
+    // Sets `type` field.
+    handle sharding_type = getattr(handle_obj, "type");
+    if (!sharding_type.is_none()) {
+      value.set_type(sharding_type.cast<xla::OpSharding_Type>());
+    }
+
+    // Sets `tile_assignment_dimensions` field.
+    std::vector<xla::int64> dims;
+    dims = getattr(handle_obj, "tile_assignment_dimensions")
+               .cast<std::vector<xla::int64>>();
+    std::copy(dims.begin(), dims.end(),
+              tensorflow::protobuf::RepeatedFieldBackInserter(
+                  value.mutable_tile_assignment_dimensions()));
+
+    // Sets `tile_assignment_devices` field.
+    std::vector<xla::int64> devices;
+    devices = getattr(handle_obj, "tile_assignment_devices")
+                  .cast<std::vector<xla::int64>>();
+    std::copy(devices.begin(), devices.end(),
+              tensorflow::protobuf::RepeatedFieldBackInserter(
+                  value.mutable_tile_assignment_devices()));
+
+    // Sets `tuple_shardings` field.
+    sequence tuple_shardings =
+        reinterpret_borrow<sequence>(getattr(handle_obj, "tuple_shardings"));
+
+    for (const auto& tuple_sharding : tuple_shardings) {
+      xla::OpSharding* sharding = value.add_tuple_shardings();
+
+      handle sharding_type = getattr(tuple_sharding, "type");
+      if (!sharding_type.is_none()) {
+        sharding->set_type(sharding_type.cast<xla::OpSharding_Type>());
+      }
+      std::vector<xla::int64> dims;
+      dims = getattr(tuple_sharding, "tile_assignment_dimensions")
+                 .cast<std::vector<xla::int64>>();
+      std::copy(dims.begin(), dims.end(),
+                tensorflow::protobuf::RepeatedFieldBackInserter(
+                    sharding->mutable_tile_assignment_dimensions()));
+
+      std::vector<xla::int64> devices;
+      devices = getattr(tuple_sharding, "tile_assignment_devices")
+                    .cast<std::vector<xla::int64>>();
+      std::copy(devices.begin(), devices.end(),
+                tensorflow::protobuf::RepeatedFieldBackInserter(
+                    sharding->mutable_tile_assignment_devices()));
+
+      sharding->set_replicate_on_last_tile_dim(
+          getattr(tuple_sharding, "replicate_on_last_tile_dim").cast<bool>());
+    }
+
+    // Sets `replicate_on_last_tile_dim` field.
+    value.set_replicate_on_last_tile_dim(
+        getattr(handle_obj, "replicate_on_last_tile_dim").cast<bool>());
+
     return true;
   }
 };

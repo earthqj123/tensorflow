@@ -15,18 +15,20 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/gpu_utils.h"
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #include <iterator>
 
 #include "google/protobuf/any.pb.h"
 #include "absl/algorithm/container.h"
+#include "absl/base/call_once.h"
 #include "tensorflow/core/platform/logger.h"
 #include "tensorflow/core/protobuf/autotuning.pb.h"
 #include "tensorflow/core/protobuf/conv_autotuning.pb.h"
+#include "tensorflow/core/util/env_var.h"
 #include "tensorflow/core/util/proto/proto_utils.h"
-#include "tensorflow/stream_executor/cuda/ptxas_utils.h"
-#include "tensorflow/stream_executor/cuda/redzone_allocator.h"
+#include "tensorflow/stream_executor/gpu/asm_compiler.h"
+#include "tensorflow/stream_executor/gpu/redzone_allocator.h"
 
 namespace tensorflow {
 
@@ -35,16 +37,15 @@ bool RedzoneCheckDisabled() {
   return disable_rz_str != nullptr && std::strcmp(disable_rz_str, "1") == 0;
 }
 
-se::DeviceMemoryBase WrapRedzoneBestEffort(
-    se::cuda::RedzoneAllocator* rz_allocator, se::DeviceMemoryBase buffer) {
+se::DeviceMemoryBase WrapRedzoneBestEffort(se::RedzoneAllocator* rz_allocator,
+                                           se::DeviceMemoryBase buffer) {
   if (RedzoneCheckDisabled()) {
     return buffer;
   }
-  se::DeviceMemoryBase output_tensor;
   auto output_rz_or = rz_allocator->AllocateBytes(buffer.size());
   if (!output_rz_or.ok()) {
-    static std::once_flag rz_allocation_failure_logged;
-    std::call_once(rz_allocation_failure_logged, []() {
+    static absl::once_flag rz_allocation_failure_logged;
+    absl::call_once(rz_allocation_failure_logged, []() {
       LOG(WARNING) << "Failed to allocate memory for convolution redzone "
                    << "checking; skipping this check. This is benign and only "
                    << "means that we won't check cudnn for out-of-bounds reads "
@@ -55,13 +56,16 @@ se::DeviceMemoryBase WrapRedzoneBestEffort(
   return se::DeviceMemoryBase(output_rz_or.ValueOrDie());
 }
 
-void CheckRedzones(const se::cuda::RedzoneAllocator& rz_allocator,
+void CheckRedzones(const se::RedzoneAllocator& rz_allocator,
                    tensorflow::AutotuneResult* autotune_result) {
-  se::port::StatusOr<se::cuda::RedzoneAllocator::RedzoneCheckStatus> rz_status =
+  if (RedzoneCheckDisabled()) {
+    return;
+  }
+  se::port::StatusOr<se::RedzoneAllocator::RedzoneCheckStatus> rz_status =
       rz_allocator.CheckRedzones();
   if (!rz_status.ok()) {
-    static std::once_flag failure_logged;
-    std::call_once(failure_logged, [&]() {
+    static absl::once_flag failure_logged;
+    absl::call_once(failure_logged, [&]() {
       LOG(WARNING) << "Failed to check cudnn convolutions for out-of-bounds "
                    << "reads and writes with an error message: '"
                    << rz_status.status().error_message()
@@ -159,6 +163,7 @@ void LogConvAutotuneResults(se::dnn::ConvolutionKind kind,
   for (const auto& result : results) {
     *log.add_results() = result;
   }
+  VLOG(2) << log.DebugString();
   Logger::GetSingleton()->LogProto(log);
 }
 
@@ -205,46 +210,93 @@ void LogFusedConvForwardAutotuneResults(
   for (const auto& result : results) {
     *log.add_results() = result;
   }
+  VLOG(2) << log.DebugString();
   Logger::GetSingleton()->LogProto(log);
 }
 
-Status BestCudnnConvAlgorithm(absl::Span<const AutotuneResult> results,
-                              se::dnn::AlgorithmConfig* algo) {
-  std::vector<AutotuneResult> filtered_results;
-  absl::c_copy_if(
-      results, std::back_inserter(filtered_results),
-      [](const AutotuneResult& result) { return !result.has_failure(); });
-  if (filtered_results.empty()) {
+// The following function allows deterministic ops to be implemented relatively
+// quickly using environment variables. It is intended to be temporary. The
+// longer-term intention is to enable deterministic ops via tf.config and
+// appropriate plumbing. See the discussion on PR 34951 for more information:
+// https://github.com/tensorflow/tensorflow/pull/34951#discussion_r355682316
+// This function and associated comment are replicated in the following three
+// places:
+//   1. tensorflow/compiler/xla/service/gpu/gpu_conv_algorithm_picker.cc
+//   2. tensorflow/core/kernels/gpu_utils.cc
+//   3. tensorflow/stream_executor/cuda/cuda_dnn.cc
+// When implementing the plumbing, you should also search for the use of
+// TF_DETERMINISTIC_OPS on its own.
+// TODO(duncanriach): move to an API that uses tf.config and implement the first
+//                    phase of plumbing.
+bool RequireCudnnDeterminism() {
+  static bool require_cudnn_determinism = [] {
+    bool deterministic_ops = false;
+    TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar("TF_DETERMINISTIC_OPS",
+                                               /*default_val=*/false,
+                                               &deterministic_ops));
+    bool cudnn_deterministic = false;
+    TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar("TF_CUDNN_DETERMINISTIC",
+                                               /*default_val=*/false,
+                                               &cudnn_deterministic));
+    return deterministic_ops || cudnn_deterministic;
+  }();
+  return require_cudnn_determinism;
+}
+
+Status BestCudnnConvAlgorithm(
+    absl::Span<const AutotuneResult> results,
+    std::vector<std::unique_ptr<se::dnn::ConvolveExecutionPlan>>* plans,
+    se::dnn::AlgorithmConfig* algo) {
+  auto compare_run_times = [](const AutotuneResult& lhs,
+                              const AutotuneResult& rhs) {
+    return proto_utils::FromDurationProto(lhs.run_time()) <
+           proto_utils::FromDurationProto(rhs.run_time());
+  };
+  int idx = -1;
+  int idx_no_scratch = -1;
+  for (int i = 0; i < results.size(); i++) {
+    if (!results[i].has_failure()) {
+      if (idx == -1 || compare_run_times(results[i], results[idx])) {
+        idx = i;
+      }
+      if (results[i].scratch_bytes() == 0 &&
+          (idx_no_scratch == -1 ||
+           compare_run_times(results[i], results[idx_no_scratch]))) {
+        idx_no_scratch = i;
+      }
+    }
+  }
+
+  if (idx == -1) {
     return errors::NotFound("No algorithm worked!");
   }
 
-  const auto best_result = absl::c_min_element(
-      filtered_results,
-      [](const AutotuneResult& lhs, const AutotuneResult& rhs) {
-        return proto_utils::FromDurationProto(lhs.run_time()) <
-               proto_utils::FromDurationProto(rhs.run_time());
-      });
-
-  const auto best_result_no_scratch = absl::c_min_element(
-      filtered_results,
-      [](const AutotuneResult& lhs, const AutotuneResult& rhs) {
-        return std::make_tuple(lhs.scratch_bytes(),
-                               proto_utils::FromDurationProto(lhs.run_time())) <
-               std::make_tuple(rhs.scratch_bytes(),
-                               proto_utils::FromDurationProto(rhs.run_time()));
-      });
-
-  algo->set_algorithm({best_result->conv().algorithm(),
-                       best_result->conv().tensor_ops_enabled()});
-  if (best_result_no_scratch != filtered_results.end() &&
-      best_result_no_scratch->scratch_bytes() == 0) {
-    algo->set_algorithm_no_scratch(
-        {best_result_no_scratch->conv().algorithm(),
-         best_result_no_scratch->conv().tensor_ops_enabled()});
+  if (plans == nullptr) {
+    algo->set_algorithm({results[idx].conv().algorithm(),
+                         results[idx].conv().tensor_ops_enabled()});
+    algo->set_scratch_size(results[idx].scratch_bytes());
+    if (idx_no_scratch != -1) {
+      algo->set_algorithm_no_scratch(
+          {results[idx_no_scratch].conv().algorithm(),
+           results[idx_no_scratch].conv().tensor_ops_enabled()});
+    }
+  } else {
+    algo->set_algorithm(
+        {(*plans)[idx]->getTag(), (*plans)[idx]->get_raw_desc()});
+    algo->set_scratch_size((*plans)[idx]->getWorkspaceSize());
+    if (idx_no_scratch != -1) {
+      algo->set_algorithm_no_scratch(
+          {(*plans)[idx_no_scratch]->getTag(),
+           (*plans)[idx_no_scratch]->get_raw_desc()});
+    }
+    algo->set_plan((*plans)[idx]);
+    if (idx_no_scratch != -1 && idx_no_scratch != idx) {
+      algo->set_plan_no_scratch((*plans)[idx_no_scratch]);
+    }
   }
   return Status::OK();
 }
 
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

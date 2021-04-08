@@ -14,13 +14,9 @@
 # ==============================================================================
 """Tests for np_utils."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
-from tensorflow.python import keras
+from tensorflow.python.keras.utils import np_utils
 from tensorflow.python.platform import test
 
 
@@ -34,7 +30,7 @@ class TestNPUtils(test.TestCase):
                        (3, 2, num_classes)]
     labels = [np.random.randint(0, num_classes, shape) for shape in shapes]
     one_hots = [
-        keras.utils.to_categorical(label, num_classes) for label in labels]
+        np_utils.to_categorical(label, num_classes) for label in labels]
     for label, one_hot, expected_shape in zip(labels,
                                               one_hots,
                                               expected_shapes):

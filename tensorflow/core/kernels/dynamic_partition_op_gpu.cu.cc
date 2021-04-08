@@ -35,30 +35,26 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
-#if GOOGLE_CUDA
-#include "third_party/cub/device/device_radix_sort.cuh"
-#include "third_party/cub/device/device_reduce.cuh"
-#include "third_party/cub/iterator/constant_input_iterator.cuh"
-#include "third_party/cub/thread/thread_operators.cuh"
-#elif TENSORFLOW_USE_ROCM
-#include "external/rocprim_archive/hipcub/include/hipcub/hipcub.hpp"
-#endif
 #include "tensorflow/core/common_runtime/gpu/gpu_event_mgr.h"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_reference.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/fill_functor.h"
 #include "tensorflow/core/kernels/gather_functor_gpu.cu.h"
+#include "tensorflow/core/kernels/gpu_prim.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
 #include "tensorflow/core/util/transform_output_iterator.h"
 
 #if GOOGLE_CUDA
-namespace gpuprim = ::cub;
+#include "tensorflow/stream_executor/cuda/cuda_activation.h"
+using stream_executor::cuda::ScopedActivateExecutorContext;
 #elif TENSORFLOW_USE_ROCM
-namespace gpuprim = ::hipcub;
-#endif
+#include "tensorflow/core/platform/rocm.h"
+using stream_executor::rocm::ScopedActivateExecutorContext;
+#endif  // GOOGLE_CUDA
 
 namespace tensorflow {
 
@@ -109,17 +105,6 @@ void MoveValues(const GPUDevice& d, int32* keys, int32* values, int32* num_runs,
                               values, num_runs, out_size, out));
 }
 
-template <typename T>
-void CallGatherKernel(const GPUDevice& d, const T* params, const int32* indices,
-                      T* out, int64 gather_dim_size, int64 indices_size,
-                      int64 slice_size, int64 out_size) {
-  GpuLaunchConfig config = GetGpuLaunchConfig(out_size, d);
-  TF_CHECK_OK(GpuLaunchKernel(GatherOpKernel<T, int32, true>,
-                              config.block_count, config.thread_per_block, 0,
-                              d.stream(), params, indices, out, gather_dim_size,
-                              indices_size, slice_size, out_size));
-}
-
 struct IdentityOp {
   __device__ int32 __forceinline__ operator()(const int32& a) const {
     return a;
@@ -139,7 +124,8 @@ class BoundedOutputIterator
     int32* base;
     // Constructor
     __host__ __device__ __forceinline__
-    BoundedReference(int32* ptr, int32* base, IdentityOp op, int32 limit)
+    BoundedReference(int32* __restrict__ ptr, int32* __restrict__ base,
+                     IdentityOp op, int32 limit)
         : Reference(ptr, op), limit(limit), base(base) {}
 
     // Assignment
@@ -153,13 +139,13 @@ class BoundedOutputIterator
   typedef BoundedOutputIterator self_type;
   typedef BoundedReference reference;
 
-  __host__ __device__ __forceinline__ BoundedOutputIterator(int32* ptr,
-                                                            IdentityOp op,
-                                                            int32 size)
+  __host__ __device__ __forceinline__
+  BoundedOutputIterator(int32* __restrict__ ptr, IdentityOp op, int32 size)
       : TransformOutputIterator(ptr, op), limit(size), base(ptr) {}
 
   __host__ __device__ __forceinline__
-  BoundedOutputIterator(int32* ptr, int32* base, IdentityOp op, int32 size)
+  BoundedOutputIterator(int32* __restrict__ ptr, int32* __restrict__ base,
+                        IdentityOp op, int32 size)
       : TransformOutputIterator(ptr, op), limit(size), base(base) {}
 
   // Indirection
@@ -313,6 +299,9 @@ class DynamicPartitionOpGPU : public AsyncOpKernel {
     TensorReference partition_ref(partition_count);
     auto wrapped_callback = [this, c, &data, &partitions, indices_out,
                              partition_ref, cpu_tensor, done]() {
+      auto stream = c->op_device_context()->stream();
+      ScopedActivateExecutorContext scoped_activation{stream->parent()};
+
       OpOutputList outputs;
       this->AllocateOutputs(c, &data, &partitions, &cpu_tensor, &outputs, done);
       if (!c->status().ok()) {
@@ -463,8 +452,9 @@ class DynamicPartitionOpGPU : public AsyncOpKernel {
       int64 out_size = outs[p]->NumElements();
       T* out_base = outs[p]->flat<T>().data();
       if (out_size > 0)
-        CallGatherKernel<T>(device, data_base, ind_base, out_base, N,
-                            indices_size, slice_size, out_size);
+        TF_CHECK_OK(LaunchGatherKernel</*is_axis_zero = */ true>(
+            device, data_base, ind_base, out_base, N, indices_size, slice_size,
+            out_size));
       ind_base += indices_size;
     }
   }
@@ -478,8 +468,7 @@ class DynamicPartitionOpGPU : public AsyncOpKernel {
       DynamicPartitionOpGPU<T>)
 
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_DYNAMIC_PARTITION_GPU);
-TF_CALL_complex64(REGISTER_DYNAMIC_PARTITION_GPU);
-TF_CALL_complex128(REGISTER_DYNAMIC_PARTITION_GPU);
+TF_CALL_COMPLEX_TYPES(REGISTER_DYNAMIC_PARTITION_GPU);
 #undef REGISTER_DYNAMIC_PARTITION_GPU
 
 }  // namespace tensorflow
